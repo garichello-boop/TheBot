@@ -1,0 +1,228 @@
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from decimal import Decimal
+from typing import Optional
+
+from db.connection import get_connection, transaction
+from bot_state.models import BotState, CycleStatus
+
+
+class DuplicateBotError(Exception):
+    """Raised when bot_state row is locked by another process."""
+    pass
+
+
+class StateRepository:
+    """
+    Read and write bot_state table.
+
+    Load uses SELECT FOR UPDATE as second-level protection against duplicate
+    bot processes (first level is bot_registry heartbeat check in StateRecovery).
+
+    All monetary values stored as NUMERIC — read back as Decimal via str().
+    active_dca_order_ids stored as TEXT[] — psycopg2 returns Python list natively.
+    """
+
+    def __init__(self, user_id: str, bot_id: str) -> None:
+        self.user_id = user_id
+        self.bot_id = bot_id
+
+    # ------------------------------------------------------------------
+    # Read
+    # ------------------------------------------------------------------
+
+    def load(self, for_update: bool = False) -> Optional[BotState]:
+        """
+        Load bot_state row. Returns None if row does not exist yet.
+
+        for_update=True: acquires row-level lock (used at startup to prevent
+        duplicate processes). Uses get_connection() directly for manual commit
+        control with SELECT FOR UPDATE NOWAIT.
+        """
+        sql = """
+            SELECT
+                user_id, bot_id, version, cycle_id, cycle_status,
+                virtual_balance_free, virtual_balance_locked,
+                position_qty, position_avg_price, dca_count,
+                quote_spent, quote_received, last_applied_trade_id,
+                active_entry_order_id, active_tp_order_id,
+                active_dca_order_ids, pending_client_order_id,
+                entered_at, last_order_at, updated_at
+            FROM bot_state
+            WHERE user_id = %s AND bot_id = %s
+        """
+        if for_update:
+            sql += " FOR UPDATE NOWAIT"
+
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                try:
+                    cur.execute(sql, (self.user_id, self.bot_id))
+                except Exception as exc:
+                    conn.rollback()
+                    if "could not obtain lock" in str(exc).lower():
+                        raise DuplicateBotError(
+                            f"bot_state row is locked for ({self.user_id}, {self.bot_id}). "
+                            "Another process is likely running this bot."
+                        ) from exc
+                    raise
+
+                row = cur.fetchone()
+                if row is None:
+                    return None
+                return BotState.from_row(dict(row))
+
+    # ------------------------------------------------------------------
+    # Write
+    # ------------------------------------------------------------------
+
+    def initialize(self, virtual_balance: Decimal) -> BotState:
+        """
+        Insert a fresh bot_state row. Called once when bot runs for the first time.
+        Returns the created BotState.
+        """
+        state = BotState.initial(self.user_id, self.bot_id, virtual_balance)
+        sql = """
+            INSERT INTO bot_state (
+                user_id, bot_id, version, cycle_id, cycle_status,
+                virtual_balance_free, virtual_balance_locked,
+                position_qty, position_avg_price, dca_count,
+                quote_spent, quote_received, last_applied_trade_id,
+                active_entry_order_id, active_tp_order_id,
+                active_dca_order_ids, pending_client_order_id,
+                entered_at, last_order_at, updated_at
+            ) VALUES (
+                %s, %s, %s, %s, %s,
+                %s, %s,
+                %s, %s, %s,
+                %s, %s, %s,
+                %s, %s,
+                %s, %s,
+                %s, %s, %s
+            )
+        """
+        with transaction() as cur:
+            cur.execute(sql, _to_params(state))
+        return state
+
+    def save(self, state: BotState) -> None:
+        """
+        Overwrite bot_state row with the given state.
+
+        Uses version check (optimistic concurrency): UPDATE fails silently if
+        the row version in DB does not match state.version - 1, meaning another
+        write happened between our load and this save.
+
+        Raises RuntimeError if no row was updated (version conflict or missing row).
+        """
+        sql = _build_update_sql()
+        params = _to_update_params(state, self.user_id, self.bot_id)
+
+        with transaction() as cur:
+            cur.execute(sql, params)
+            if cur.rowcount == 0:
+                raise RuntimeError(
+                    f"bot_state save failed for ({self.user_id}, {self.bot_id}): "
+                    f"version conflict or row missing. "
+                    f"Expected DB version {state.version - 1}, state version {state.version}."
+                )
+
+    def save_in_transaction(self, conn, state: BotState) -> None:
+        """
+        Write bot_state inside an ALREADY OPEN transaction (e.g. alongside trade insert).
+        Caller owns commit/rollback. Same version check as save().
+
+        conn is a raw psycopg2 connection obtained via get_connection().
+        """
+        sql = _build_update_sql()
+        params = _to_update_params(state, self.user_id, self.bot_id)
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+        # rowcount check is caller's responsibility when sharing transaction
+
+
+# ------------------------------------------------------------------
+# Internal helpers
+# ------------------------------------------------------------------
+
+def _build_update_sql() -> str:
+    return """
+        UPDATE bot_state SET
+            version                 = %s,
+            cycle_id                = %s,
+            cycle_status            = %s,
+            virtual_balance_free    = %s,
+            virtual_balance_locked  = %s,
+            position_qty            = %s,
+            position_avg_price      = %s,
+            dca_count               = %s,
+            quote_spent             = %s,
+            quote_received          = %s,
+            last_applied_trade_id   = %s,
+            active_entry_order_id   = %s,
+            active_tp_order_id      = %s,
+            active_dca_order_ids    = %s,
+            pending_client_order_id = %s,
+            entered_at              = %s,
+            last_order_at           = %s,
+            updated_at              = %s
+        WHERE user_id = %s
+          AND bot_id  = %s
+          AND version = %s
+    """
+
+
+def _to_update_params(state: BotState, user_id: str, bot_id: str) -> tuple:
+    now = datetime.now(timezone.utc)
+    return (
+        state.version,
+        state.cycle_id,
+        state.cycle_status.value,
+        state.virtual_balance_free,
+        state.virtual_balance_locked,
+        state.position_qty,
+        state.position_avg_price,
+        state.dca_count,
+        state.quote_spent,
+        state.quote_received,
+        state.last_applied_trade_id,
+        state.active_entry_order_id,
+        state.active_tp_order_id,
+        list(state.active_dca_order_ids),   # TEXT[] expects list
+        state.pending_client_order_id,
+        state.entered_at,
+        state.last_order_at,
+        now,
+        # WHERE clause
+        user_id,
+        bot_id,
+        state.version - 1,                  # expected previous version
+    )
+
+
+def _to_params(state: BotState) -> tuple:
+    """Serialize BotState to INSERT params tuple."""
+    now = datetime.now(timezone.utc)
+    return (
+        state.user_id,
+        state.bot_id,
+        state.version,
+        state.cycle_id,
+        state.cycle_status.value,
+        state.virtual_balance_free,
+        state.virtual_balance_locked,
+        state.position_qty,
+        state.position_avg_price,
+        state.dca_count,
+        state.quote_spent,
+        state.quote_received,
+        state.last_applied_trade_id,
+        state.active_entry_order_id,
+        state.active_tp_order_id,
+        list(state.active_dca_order_ids),
+        state.pending_client_order_id,
+        state.entered_at,
+        state.last_order_at,
+        now,
+    )
