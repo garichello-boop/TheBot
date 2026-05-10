@@ -13,7 +13,7 @@ import psycopg2
 import psycopg2.extras
 
 from db import get_connection, transaction
-from .models import BotConfig
+from .models import BotConfig, BotStatus
 from .validator import ConfigValidator, ValidationResult
 
 logger = logging.getLogger(__name__)
@@ -74,8 +74,17 @@ class ConfigRepository:
     """
     Loads and reloads bot configuration from bot_configs.
 
+    Constructor
+    -----------
+    ConfigRepository(db_pool, validator=None)
+
+    db_pool  — connection pool created by create_pool() in bot.py.
+               Stored as self._pool; get_connection()/transaction() use the
+               globally configured pool (same pattern as StateRepository).
+    validator — optional ConfigValidator; defaults to ConfigValidator() if None.
+
     Lifecycle:
-        repo = ConfigRepository(validator)
+        repo = ConfigRepository(db_pool)
         config = repo.load(user_id, bot_id)    # startup: lock + validate
         ...
         config = repo.reload(user_id, bot_id)  # before new cycle: no lock
@@ -83,7 +92,12 @@ class ConfigRepository:
         repo.release(user_id, bot_id)           # shutdown: release lock
     """
 
-    def __init__(self, validator: ConfigValidator | None = None) -> None:
+    def __init__(
+        self,
+        db_pool,
+        validator: ConfigValidator | None = None,
+    ) -> None:
+        self._pool = db_pool  # stored; get_connection()/transaction() use global pool
         self._validator = validator if validator is not None else ConfigValidator()
         # Dedicated connection that holds the advisory lock for the bot's lifetime.
         # See ADR-001 above for why this must not be a pool connection.
@@ -170,6 +184,49 @@ class ConfigRepository:
         self._release_lock()
         logger.info(
             "ConfigRepository: advisory lock released for %s/%s.", user_id, bot_id
+        )
+
+    # ------------------------------------------------------------------
+    # Status update
+    # ------------------------------------------------------------------
+
+    def set_status(self, user_id: str, bot_id: str, status: BotStatus) -> None:
+        """
+        Programmatically update bot status in bot_configs.
+
+        Called by the bot itself when a status change is required without
+        operator intervention — for example, when a TP is cancelled manually
+        (FSM → CLOSE_ONLY) or a STOP_CRANE condition is detected.
+
+        Increments config_version so ConfigWatcher detects the change on
+        the next cycle boundary and reloads the full config.
+
+        Note: this is a deliberate exception to the rule that only the
+        operator and WFO write to bot_configs. The bot writes status only
+        — never strategy_params or virtual_balance.
+
+        Raises:
+            BotConfigNotFoundError: row not found in bot_configs.
+        """
+        query = """
+            UPDATE bot_configs
+               SET status         = %s,
+                   config_version = config_version + 1,
+                   updated_at     = NOW()
+             WHERE user_id = %s
+               AND bot_id  = %s
+        """
+        with transaction() as cur:
+            cur.execute(query, (status.value, user_id, bot_id))
+            if cur.rowcount == 0:
+                raise BotConfigNotFoundError(
+                    f"set_status: no row in bot_configs for "
+                    f"user_id={user_id!r}, bot_id={bot_id!r}."
+                )
+
+        logger.info(
+            "ConfigRepository: status set to %r for %s/%s.",
+            status.value, user_id, bot_id,
         )
 
     # ------------------------------------------------------------------

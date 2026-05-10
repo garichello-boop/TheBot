@@ -1,5 +1,5 @@
 from enum import Enum
-from pydantic import field_validator
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -35,10 +35,10 @@ class KeysSettings(BaseSettings):
 class LoggingSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="LOG_")
 
-    level:         LogLevel = LogLevel.INFO
-    folder:        str      = "logs/"
-    max_bytes:     int      = 10 * 1024 * 1024  # 10 MB
-    backup_count:  int      = 10
+    level:         LogLevel     = LogLevel.INFO
+    folder:        str          = "logs/"
+    max_bytes:     int          = 10 * 1024 * 1024  # 10 MB
+    backup_count:  int          = 10
     telegram_mode: TelegramMode = TelegramMode.IMPORTANT
 
     @field_validator("max_bytes")
@@ -82,13 +82,25 @@ class TelegramSettings(BaseSettings):
 class BrokerSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="BROKER_")
 
-    type:                    BrokerType = BrokerType.PAPER
-    request_timeout_sec:     float      = 5.0
-    retry_delay_sec:         float      = 1.0
-    max_retries:             int        = 3
-    paper_initial_balance:   float      = 1000.0
-    paper_commission_pct:    float      = 0.1
-    paper_slippage_pct:      float      = 0.05
+    # Поле названо broker_type, но читается из env BROKER_TYPE через alias.
+    # alias="TYPE" + env_prefix="BROKER_" → env var BROKER_TYPE.
+    # bot.py использует settings.broker.broker_type — имя поля совпадает.
+    broker_type: BrokerType = Field(
+        default=BrokerType.PAPER,
+        alias="TYPE",
+    )
+
+    model_config = SettingsConfigDict(
+        env_prefix="BROKER_",
+        populate_by_name=True,   # разрешает обращение и по alias, и по имени поля
+    )
+
+    request_timeout_sec:   float = 5.0
+    retry_delay_sec:       float = 1.0
+    max_retries:           int   = 3
+    paper_initial_balance: float = 1000.0
+    paper_commission_pct:  float = 0.1
+    paper_slippage_pct:    float = 0.05
 
     @field_validator("request_timeout_sec", "retry_delay_sec")
     @classmethod
@@ -108,15 +120,15 @@ class BrokerSettings(BaseSettings):
 class MarketSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="MARKET_")
 
-    provider:           str   = "bybit"
-    ticker:             str   = "BTCUSDT"
-    timeframe:          str   = "1h"
-    stale_threshold_sec: int  = 30
-    poll_interval_sec:  int   = 10
-    reconnect_delay_sec: int  = 1
-    max_reconnect_sec:  int   = 30
+    provider:            str   = "bybit"
+    ticker:              str   = "BTCUSDT"
+    timeframe:           str   = "1h"
+    stale_threshold_sec: int   = 30
+    poll_interval_sec:   int   = 10
+    reconnect_delay_sec: int   = 1
+    max_reconnect_sec:   int   = 30
     spike_threshold_pct: float = 10.0
-    max_spread_pct:     float  = 1.0
+    max_spread_pct:      float = 1.0
 
 
 class DatabaseSettings(BaseSettings):

@@ -3,19 +3,15 @@ Observability — подсистема наблюдаемости торгово
 
 Точка входа: setup_observability() создаёт и возвращает настроенный EventEmitter.
 
-Пример использования:
+Пример использования (bot.py):
     from observability import setup_observability
 
     emitter = setup_observability(
-        bot_id="phor_dca",
-        ticker="PHOR",
-        strategy_name="MeanReversion",
-        log_folder="logs/",
-        log_level="INFO",
-        telegram_token="...",      # опционально
-        telegram_chat_id="...",    # опционально
-        telegram_mode="IMPORTANT", # ALL / IMPORTANT / OFF
-        postgres_dsn="...",        # опционально
+        settings=settings,       # AppSettings — все параметры берутся отсюда
+        bot_id=bot_id,
+        ticker=ticker,
+        tg_token=km.get("TG_BOT_TOKEN"),    # опционально
+        tg_chat_id=km.get("TG_CHAT_ID"),    # опционально
     )
 
     emitter.emit(event_type="BOT_STARTED", level="INFO", message="Бот запущен")
@@ -51,31 +47,38 @@ __all__ = [
 
 
 def setup_observability(
+    settings,                           # AppSettings — без аннотации, избегаем циклического импорта
     bot_id: str,
     ticker: str = "",
     strategy_name: str = "",
-    # Logging
-    log_folder: str = "logs/",
-    log_level: str = "INFO",
-    log_max_bytes: int = 10 * 1024 * 1024,
-    log_backup_count: int = 10,
-    # Telegram
-    telegram_token: Optional[str] = None,
-    telegram_chat_id: Optional[str] = None,
-    telegram_mode: str = "IMPORTANT",  # ALL / IMPORTANT / OFF
-    telegram_max_per_minute: int = 20,
-    telegram_dedup_window_sec: int = 300,
-    # PostgreSQL
-    postgres_dsn: Optional[str] = None,
-    postgres_batch_size: int = 50,
-    postgres_flush_interval_sec: float = 5.0,
+    tg_token: Optional[str] = None,     # km.get("TG_BOT_TOKEN") из bot.py
+    tg_chat_id: Optional[str] = None,   # km.get("TG_CHAT_ID") из bot.py
 ) -> EventEmitter:
     """
-    Создать и настроить EventEmitter со всеми sink-ами.
+    Создать и настроенный EventEmitter, извлекая параметры из AppSettings.
 
-    Минимальная конфигурация: только bot_id.
-    Telegram и PostgreSQL — опциональны, подключаются если переданы credentials.
+    Параметры Telegram и PostgreSQL опциональны:
+    - Telegram включается если переданы tg_token + tg_chat_id
+      и settings.telegram.mode != OFF.
+    - PostgreSQL включается если settings.database.password задан
+      (предполагается что конфигурация БД означает желание писать события).
+
+    Все параметры логирования, rate-limiting Telegram и ротации файлов
+    берутся из settings.logging и settings.telegram.
     """
+    # --- Извлечь параметры из AppSettings ---
+    log_folder       = settings.logging.folder
+    log_level        = settings.logging.level.value
+    log_max_bytes    = settings.logging.max_bytes
+    log_backup_count = settings.logging.backup_count
+    tg_mode          = settings.telegram.mode.value        # ALL / IMPORTANT / OFF
+    tg_max_per_min   = settings.telegram.max_per_minute
+    tg_dedup_sec     = settings.telegram.dedup_window_sec
+
+    # PostgreSQL: используем URL из settings.database если пароль задан
+    db = settings.database
+    postgres_dsn = db.url if db.password else None
+
     os.makedirs(log_folder, exist_ok=True)
 
     emitter = EventEmitter(
@@ -108,12 +111,12 @@ def setup_observability(
     _setup_console_handler(log_level)
 
     # --- TelegramSink ---
-    if telegram_mode.upper() != "OFF" and telegram_token and telegram_chat_id:
+    if tg_mode != "OFF" and tg_token and tg_chat_id:
         tg_sink = TelegramSink(
-            token=telegram_token,
-            chat_id=telegram_chat_id,
-            max_per_minute=telegram_max_per_minute,
-            dedup_window_sec=telegram_dedup_window_sec,
+            token=tg_token,
+            chat_id=tg_chat_id,
+            max_per_minute=tg_max_per_min,
+            dedup_window_sec=tg_dedup_sec,
         )
         emitter.set_telegram_sink(tg_sink)
 
@@ -121,8 +124,8 @@ def setup_observability(
     if postgres_dsn:
         pg_sink = PostgresSink(
             dsn=postgres_dsn,
-            batch_size=postgres_batch_size,
-            flush_interval_sec=postgres_flush_interval_sec,
+            batch_size=50,
+            flush_interval_sec=5.0,
         )
         emitter.set_postgres_sink(pg_sink)
 
@@ -132,7 +135,6 @@ def setup_observability(
 def _setup_console_handler(min_level: str) -> None:
     """Настроить вывод WARNING+ в консоль через стандартный logging."""
     root = logging.getLogger()
-    # Не добавлять дублирующий handler
     for h in root.handlers:
         if isinstance(h, logging.StreamHandler) and h.stream is sys.stderr:
             return

@@ -17,9 +17,10 @@ Soft-fail contract:
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from typing import Optional
 
-from .models import BotConfig, CycleSnapshot
+from .models import BotConfig, BotStatus, CycleSnapshot
 from .repository import ConfigRepository, BotConfigNotFoundError
 from .validator import ValidationResult
 
@@ -111,37 +112,82 @@ class ConfigWatcher:
     """
     Detects config_version changes and reloads bot_configs before new cycles.
 
-    Lifecycle:
-        # At startup (after ConfigRepository.load()):
-        watcher = ConfigWatcher(repo)
-        watcher.initialize(config)
+    Construction
+    ------------
+    Two patterns are supported:
 
+    Pattern A — bot.py (auto-load at construction):
+        watcher = ConfigWatcher(repo, user_id=user_id, bot_id=bot_id)
+        config  = watcher.get_config()   # works immediately, no initialize() needed
+
+        When user_id and bot_id are provided, ConfigWatcher calls
+        repo.load(user_id, bot_id) in __init__, acquiring the advisory lock
+        and validating the config. get_config() is immediately available.
+
+    Pattern B — manual (tests, staged setup):
+        watcher = ConfigWatcher(repo)
+        watcher.initialize(config)        # set config explicitly
+        config  = watcher.get_config()   # works after initialize()
+
+    Lifecycle:
         # Before each new trading cycle:
         result = watcher.check_and_reload(user_id, bot_id)
         if result.reload_failed:
             emitter.emit(event_type="CONFIG_ERROR", ...)
-            # decide: skip cycle or stop bot
-        config = result.config
+        config   = result.config
         snapshot = CycleSnapshot.from_config(config)
 
-        # Read current config without triggering a reload:
+        # Read current config without DB call:
         config = watcher.get_config()
+
+        # Create CycleSnapshot for a new cycle:
+        snapshot = watcher.create_snapshot()
+
+        # Set CLOSE_ONLY from bot code (manual TP/DCA cancellation):
+        watcher.set_close_only(user_id, bot_id)
     """
 
-    def __init__(self, repo: ConfigRepository) -> None:
-        self._repo = repo
+    def __init__(
+        self,
+        repo: ConfigRepository,
+        *,
+        user_id: Optional[str] = None,
+        bot_id: Optional[str] = None,
+    ) -> None:
+        self._repo     = repo
+        self._user_id  = user_id
+        self._bot_id   = bot_id
         self._current: BotConfig | None = None
 
+        # Pattern A: auto-load at construction when user_id/bot_id provided.
+        # Calls repo.load() which acquires the advisory lock and validates.
+        if user_id is not None and bot_id is not None:
+            config = repo.load(user_id, bot_id)
+            self._current = config
+            logger.debug(
+                "ConfigWatcher: auto-loaded config for %s/%s (version=%d).",
+                user_id, bot_id, config.config_version,
+            )
+
     # ------------------------------------------------------------------
-    # Initialization
+    # Initialization (Pattern B)
     # ------------------------------------------------------------------
 
     def initialize(self, config: BotConfig) -> None:
         """
-        Set the initial config after startup load.
-        Must be called before check_and_reload() or get_config().
+        Set the initial config explicitly (Pattern B).
+
+        Must be called before check_and_reload() or get_config() when
+        ConfigWatcher was constructed without user_id/bot_id.
+
+        If user_id/bot_id were passed to __init__ (Pattern A), this method
+        can still be used to override the auto-loaded config (e.g. in tests).
         """
         self._current = config
+        if self._user_id is None:
+            self._user_id = config.user_id
+        if self._bot_id is None:
+            self._bot_id = config.bot_id
         logger.debug(
             "ConfigWatcher: initialized with version=%d for %s/%s.",
             config.config_version, config.user_id, config.bot_id,
@@ -151,9 +197,16 @@ class ConfigWatcher:
     # Check and reload
     # ------------------------------------------------------------------
 
-    def check_and_reload(self, user_id: str, bot_id: str) -> WatchResult:
+    def check_and_reload(
+        self,
+        user_id: Optional[str] = None,
+        bot_id: Optional[str] = None,
+    ) -> WatchResult:
         """
         Compare current config_version with DB. Reload if changed.
+
+        user_id / bot_id are optional: if omitted, the values stored at
+        construction (Pattern A) or via initialize() (Pattern B) are used.
 
         Always returns WatchResult — never raises on validation failure.
         Raises only on unexpected DB errors (BotConfigNotFoundError, etc.)
@@ -163,45 +216,51 @@ class ConfigWatcher:
         """
         if self._current is None:
             raise RuntimeError(
-                "ConfigWatcher.check_and_reload() called before initialize(). "
-                "Call initialize(config) first."
+                "ConfigWatcher.check_and_reload() called before config is set. "
+                "Pass user_id/bot_id to __init__() or call initialize() first."
+            )
+
+        uid = user_id or self._user_id
+        bid = bot_id  or self._bot_id
+        if uid is None or bid is None:
+            raise RuntimeError(
+                "ConfigWatcher.check_and_reload() requires user_id and bot_id. "
+                "Pass them as arguments or to ConfigWatcher.__init__()."
             )
 
         old = self._current
 
-        # Fast check: read only config_version from DB (lightweight query).
-        db_version = self._fetch_version(user_id, bot_id)
+        # Fast check: read only config_version (avoids deserializing JSONB).
+        db_version = self._fetch_version(uid, bid)
 
         if db_version == old.config_version:
             logger.debug(
                 "ConfigWatcher: version unchanged (%d) for %s/%s.",
-                db_version, user_id, bot_id,
+                db_version, uid, bid,
             )
             return WatchResult.unchanged(old)
 
         # Version changed — reload full config.
         logger.info(
             "ConfigWatcher: version changed %d -> %d for %s/%s, reloading.",
-            old.config_version, db_version, user_id, bot_id,
+            old.config_version, db_version, uid, bid,
         )
 
-        new_config, validation = self._repo.reload(user_id, bot_id)
+        new_config, validation = self._repo.reload(uid, bid)
 
         if not validation.is_valid:
-            # Soft-fail: keep old config, report failure to caller.
             logger.error(
                 "ConfigWatcher: new config (version=%d) is invalid for %s/%s. "
                 "Keeping version=%d. Errors: %s",
-                db_version, user_id, bot_id,
+                db_version, uid, bid,
                 old.config_version, "; ".join(validation.errors),
             )
             return WatchResult.failed(old, db_version, validation)
 
-        # Valid new config — update cache.
         self._current = new_config
         logger.info(
             "ConfigWatcher: config updated to version=%d for %s/%s.",
-            new_config.config_version, user_id, bot_id,
+            new_config.config_version, uid, bid,
         )
         return WatchResult.changed(old, new_config)
 
@@ -212,14 +271,61 @@ class ConfigWatcher:
     def get_config(self) -> BotConfig:
         """
         Return the current cached config without touching the DB.
-        Use during an active cycle (bot works with CycleSnapshot, but
-        BotLoop may need to check status between ticks).
+
+        Available immediately after construction with user_id/bot_id (Pattern A),
+        or after initialize() (Pattern B).
         """
         if self._current is None:
             raise RuntimeError(
-                "ConfigWatcher.get_config() called before initialize()."
+                "ConfigWatcher.get_config() called before config is set. "
+                "Pass user_id/bot_id to __init__() or call initialize() first."
             )
         return self._current
+
+    def create_snapshot(self) -> CycleSnapshot:
+        """
+        Create a CycleSnapshot from the current cached config.
+
+        Call after check_and_reload() to freeze strategy_params for the new
+        cycle. The bot works exclusively with this snapshot until the cycle
+        closes — WFO updates to bot_configs are invisible to it.
+
+        Raises:
+            RuntimeError: if called before config is set.
+        """
+        return CycleSnapshot.from_config(self.get_config())
+
+    # ------------------------------------------------------------------
+    # Status mutations
+    # ------------------------------------------------------------------
+
+    def set_close_only(self, user_id: str, bot_id: str) -> None:
+        """
+        Set bot status to CLOSE_ONLY in bot_configs.
+
+        Called by BotLoop._execute_set_close_only() when a TP or DCA is
+        manually cancelled (operator intervention detected).
+
+        Updates both the DB (via ConfigRepository.set_status()) and the
+        local cached config so subsequent get_config() calls reflect the
+        new status without waiting for the next check_and_reload().
+
+        Raises:
+            BotConfigNotFoundError: row not found in bot_configs.
+        """
+        self._repo.set_status(user_id, bot_id, BotStatus.CLOSE_ONLY)
+
+        # Optimistically update the cached config to reflect the status change.
+        # config_version is not updated here — the DB increment will be detected
+        # by check_and_reload() on the next cycle boundary, which will reload
+        # the full config at that point.
+        if self._current is not None:
+            self._current = replace(self._current, status=BotStatus.CLOSE_ONLY)
+
+        logger.info(
+            "ConfigWatcher: status set to CLOSE_ONLY for %s/%s.",
+            user_id, bot_id,
+        )
 
     # ------------------------------------------------------------------
     # Internals

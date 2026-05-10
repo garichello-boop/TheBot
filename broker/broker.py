@@ -6,24 +6,34 @@ BybitBroker) создаётся через BrokerFactory и подставляе
 Переключение биржи — одна строка в конфиге, ноль изменений в боте.
 
 Ключевое разделение ответственности:
-- create_order()  → возвращает OrderCreated (PENDING), только факт принятия
-- Факт исполнения → приходит отдельно: PaperBroker эмитит синхронно,
-                    BybitBroker — через OrderTracker по приватному WS
+- create_order()       → возвращает OrderCreated (PENDING), только факт принятия
+- get_pending_fills()  → дренирует внутреннюю очередь FillEvent (WS/paper)
+- get_fills()          → исторические сделки для reconciliation (startp/Close Protocol)
+- Факт исполнения в рабочем режиме приходит через get_pending_fills() каждый тик,
+  а не через polling get_order_status().
 """
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import List, Optional
+from typing import TYPE_CHECKING, List, Optional
 
 from broker.models import (
     Balance,
     BrokerMode,
+    HistoricalFill,
     MarketInfo,
     OpenOrder,
     OrderCreated,
     OrderRequest,
     OrderStatus,
 )
+
+if TYPE_CHECKING:
+    # FillEvent живёт в business_logic.types — туда его переместили потому что
+    # он несёт order_type (ENTRY/TP/DCA), что является бизнес-логикой, а не
+    # брокерской концепцией. Импорт только для аннотаций (from __future__ import
+    # annotations делает их строками на рантайме → нет циклического импорта).
+    from business_logic.types import FillEvent
 
 
 # ---------------------------------------------------------------------------
@@ -95,8 +105,10 @@ class IBroker(ABC):
     Контракт:
     - create_order() гарантирует либо OrderCreated(PENDING), либо исключение
     - BrokerTimeout означает неизвестный исход → STOP-CRANE, без retry
+    - get_pending_fills() дренирует очередь fill-событий каждый тик
     - get_order_status() и get_open_orders() используются ТОЛЬКО при reconciliation
-    - В рабочем режиме статусы ордеров приходят через OrderTracker (WS)
+    - get_fills() используется ТОЛЬКО при reconciliation (startup / Close Protocol)
+    - В рабочем режиме статусы ордеров приходят через get_pending_fills()
     """
 
     @abstractmethod
@@ -105,7 +117,7 @@ class IBroker(ABC):
         Выставить ордер на биржу.
 
         Возвращает OrderCreated со статусом PENDING — только подтверждение
-        принятия. Факт исполнения приходит позже через OrderFill.
+        принятия. Факт исполнения приходит позже через get_pending_fills().
 
         Raises:
             BrokerTimeout: истёк BROKER_REQUEST_TIMEOUT_SEC.
@@ -137,21 +149,23 @@ class IBroker(ABC):
         Разовая проверка статуса ордера.
 
         Используется ТОЛЬКО при reconciliation на старте.
-        В рабочем режиме статусы ордеров приходят через OrderTracker (WS) —
+        В рабочем режиме статусы приходят через get_pending_fills() —
         не вызывать get_order_status() внутри tick-loop.
 
         Raises:
-            OrderNotFoundError: ордер не найден (возможно уже исполнен/отменён).
+            OrderNotFoundError: ордер не найден.
             BrokerError: ошибка запроса.
         """
 
     @abstractmethod
     def get_balance(self) -> Balance:
         """
-        Получить текущий баланс аккаунта в котируемой валюте (USDT).
+        Получить текущий баланс аккаунта.
+
+        Возвращает Balance с полями free и locked — dict[asset, Decimal].
+        Торговать можно только из Balance.free[quote_asset].
 
         Используется в TickContext и BalanceReconciler.
-        Торговать можно только из Balance.free.
 
         Raises:
             BrokerError: ошибка запроса.
@@ -180,6 +194,55 @@ class IBroker(ABC):
 
         Используется при reconciliation на старте: бот запрашивает ВСЕ
         активные ордера по тикеру и сопоставляет с persisted_state.
+
+        Raises:
+            BrokerError: ошибка запроса.
+        """
+
+    @abstractmethod
+    def get_pending_fills(self) -> "List[FillEvent]":
+        """
+        Дренировать внутреннюю очередь событий исполнения.
+
+        Вызывается в начале каждого тика из TickContext.collect().
+        Возвращает все накопившиеся с прошлого тика события и очищает очередь.
+
+        FillEvent (из business_logic.types) несёт order_type (ENTRY/TP/DCA) —
+        роль ордера в торговом цикле. Эту роль проставляет OrderManager при
+        регистрации ордера: он добавляет (client_order_id → role) в реестр,
+        а реализация брокера использует реестр для обогащения fill-событий
+        перед помещением в очередь.
+
+        Отличается от get_fills():
+          get_pending_fills() — real-time очередь WS-событий / PaperBroker,
+                               вызывается каждый тик.
+          get_fills()         — исторический запрос к бирже,
+                               только для reconciliation на старте.
+
+        Raises:
+            BrokerError: ошибка доступа к внутренней очереди (редко).
+        """
+
+    @abstractmethod
+    def get_fills(
+        self,
+        ticker: str,
+        since_trade_id: Optional[str] = None,
+    ) -> List[HistoricalFill]:
+        """
+        Получить историю исполненных сделок по тикеру.
+
+        since_trade_id — если указан, возвращает только сделки после него
+        (инкрементальный reconciliation по last_applied_trade_id из bot_state).
+        since_trade_id=None → все доступные сделки по тикеру (для первичного
+        reconciliation или после длительного даунтайма).
+
+        Используется ТОЛЬКО при reconciliation:
+        - StateRecovery.startup() шаг 4: прочитать fills с last_applied_trade_id
+        - Close Protocol шаг 5: перечитать fills после отмены DCA
+
+        В рабочем режиме fills приходят через get_pending_fills() —
+        не вызывать get_fills() внутри tick-loop.
 
         Raises:
             BrokerError: ошибка запроса.

@@ -273,6 +273,7 @@ def main() -> None:
             state_manager=state_manager,
             registry_repo=registry_repo,
             emitter=emitter,
+            virtual_balance=bot_config.virtual_balance,
         )
         logger.info("StateRecovery завершён — готов к торговле")
     except RuntimeError as exc:

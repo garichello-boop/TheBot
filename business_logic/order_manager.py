@@ -130,6 +130,11 @@ class OrderManager:
 
         created = self._send_order(request, order_role=OrderType.ENTRY)
 
+        # Регистрируем роль ордера для PaperBroker.get_pending_fills()
+        # Duck-typing: BybitBroker не реализует этот метод — вызов пропускается.
+        if hasattr(self._broker, "register_order_role"):
+            self._broker.register_order_role(created.exchange_order_id, "ENTRY")
+
         # Phase 2: сохраняем exchange_order_id
         new_state = self._state_manager.commit(
             new_state,
@@ -207,6 +212,9 @@ class OrderManager:
 
         created = self._send_order(request, order_role=OrderType.TP)
 
+        if hasattr(self._broker, "register_order_role"):
+            self._broker.register_order_role(created.exchange_order_id, "TP")
+
         new_state = self._state_manager.commit(
             new_state,
             replace(
@@ -259,6 +267,9 @@ class OrderManager:
         )
 
         created = self._send_order(request, order_role=OrderType.DCA)
+
+        if hasattr(self._broker, "register_order_role"):
+            self._broker.register_order_role(created.exchange_order_id, "DCA")
 
         # Добавляем к списку активных DCA-ордеров (для EAGER-режима)
         updated_dca_ids = (*state.active_dca_order_ids, created.exchange_order_id)

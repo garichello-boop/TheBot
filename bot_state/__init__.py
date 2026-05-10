@@ -2,7 +2,7 @@ from bot_state.models import BotState, BotRegistry, CycleStatus, OperationalStat
 from bot_state.state_fsm import StateFSM, InvalidTransitionError
 from bot_state.state_repo import StateRepository, DuplicateBotError
 from bot_state.registry_repo import RegistryRepository
-from bot_state.state_manager import StateManager
+from bot_state.state_manager import StateManager, StateInvariantError
 from bot_state.state_recovery import StateRecovery, BotAlreadyRunningError
 
 __all__ = [
@@ -16,6 +16,7 @@ __all__ = [
     "DuplicateBotError",
     "RegistryRepository",
     "StateManager",
+    "StateInvariantError",
     "StateRecovery",
     "BotAlreadyRunningError",
 ]

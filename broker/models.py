@@ -156,6 +156,35 @@ class OpenOrder:
 
 
 # ---------------------------------------------------------------------------
+# Исторические fills (для reconciliation)
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class HistoricalFill:
+    """
+    Исполненная сделка из истории биржи.
+
+    Используется StateRecovery при reconciliation на старте (шаг 4)
+    и Close Protocol (шаг 5): перечитать fills с момента last_applied_trade_id.
+
+    Отличается от OrderFill: содержит trade_id — уникальный ID сделки
+    на бирже, необходимый для инкрементального reconciliation через
+    last_applied_trade_id из bot_state. OrderFill — для real-time уведомлений
+    от OrderTracker и PaperBroker; HistoricalFill — для запросов истории.
+    """
+    trade_id: str              # Уникальный ID сделки на бирже (ключ для last_applied_trade_id)
+    exchange_order_id: str
+    client_order_id: str       # Может быть пустым если биржа не поддерживает
+    ticker: str
+    side: OrderSide
+    filled_qty: Decimal
+    avg_price: Decimal
+    commission: Decimal        # В котируемой валюте (USDT)
+    timestamp: float           # Unix timestamp момента исполнения
+    mode: BrokerMode
+
+
+# ---------------------------------------------------------------------------
 # Результат нормализации
 # ---------------------------------------------------------------------------
 

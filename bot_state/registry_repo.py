@@ -12,20 +12,32 @@ class RegistryRepository:
     """
     Read and write bot_registry table.
 
-    bot_registry tracks operational status of the bot process (heartbeat, pid).
-    Separate from bot_state: different access patterns, different write frequency.
-    Heartbeat updates happen every N ticks; state updates happen on every order event.
+    Stateless repository: db_pool accepted at construction, user_id/bot_id
+    passed explicitly to every method. A single instance can serve multiple
+    bots (monitoring, multi-bot manager).
+
+    get_connection() / transaction() use the globally configured pool
+    (initialised by create_pool() in bot.py before any repo is created).
+    self._pool is stored for future direct-pool usage or re-initialisation.
+
+    Public write API
+    ----------------
+    upsert()           — full insert-or-update; COALESCE keeps existing
+                         DB value for every None keyword argument.
+    update_heartbeat() — fast-path: only last_heartbeat + RUNNING status.
+                         Called every HEARTBEAT_INTERVAL_TICKS ticks.
+    update_status()    — semantic shortcut for STOPPED / ERROR transitions.
+                         Called by HeartbeatEmitter.mark_stopped/mark_error.
     """
 
-    def __init__(self, user_id: str, bot_id: str) -> None:
-        self.user_id = user_id
-        self.bot_id = bot_id
+    def __init__(self, db_pool) -> None:
+        self._pool = db_pool
 
     # ------------------------------------------------------------------
     # Read
     # ------------------------------------------------------------------
 
-    def load(self) -> Optional[BotRegistry]:
+    def load(self, user_id: str, bot_id: str) -> Optional[BotRegistry]:
         """Load registry row. Returns None if bot has never been started."""
         sql = """
             SELECT
@@ -36,7 +48,7 @@ class RegistryRepository:
         """
         with get_connection() as conn:
             with conn.cursor() as cur:
-                cur.execute(sql, (self.user_id, self.bot_id))
+                cur.execute(sql, (user_id, bot_id))
                 row = cur.fetchone()
                 if row is None:
                     return None
@@ -48,6 +60,8 @@ class RegistryRepository:
 
     def upsert(
         self,
+        user_id: str,
+        bot_id: str,
         status: OperationalStatus,
         *,
         pid: Optional[int] = None,
@@ -58,7 +72,16 @@ class RegistryRepository:
     ) -> None:
         """
         Insert or update registry row.
-        Only provided keyword arguments are written; others keep their DB value.
+
+        COALESCE semantics: keyword arguments that are None keep their
+        existing DB value. Pass explicitly to overwrite.
+
+        Common patterns:
+          upsert(user_id, bot_id, STARTING, started_at=now)
+          upsert(user_id, bot_id, RUNNING,  last_heartbeat=now)
+          upsert(user_id, bot_id, STOPPED,  stopped_at=now)
+          upsert(user_id, bot_id, ERROR,    error_message=msg, stopped_at=now)
+
         pid defaults to current process PID when not explicitly passed.
         """
         effective_pid = pid if pid is not None else os.getpid()
@@ -69,30 +92,27 @@ class RegistryRepository:
                 pid, started_at, stopped_at, error_message, last_heartbeat
             ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (user_id, bot_id) DO UPDATE SET
-                operational_status  = EXCLUDED.operational_status,
-                pid                 = EXCLUDED.pid,
-                started_at          = COALESCE(EXCLUDED.started_at,  bot_registry.started_at),
-                stopped_at          = COALESCE(EXCLUDED.stopped_at,  bot_registry.stopped_at),
-                error_message       = COALESCE(EXCLUDED.error_message, bot_registry.error_message),
-                last_heartbeat      = COALESCE(EXCLUDED.last_heartbeat, bot_registry.last_heartbeat)
+                operational_status = EXCLUDED.operational_status,
+                pid                = EXCLUDED.pid,
+                started_at         = COALESCE(EXCLUDED.started_at,    bot_registry.started_at),
+                stopped_at         = COALESCE(EXCLUDED.stopped_at,    bot_registry.stopped_at),
+                error_message      = COALESCE(EXCLUDED.error_message,  bot_registry.error_message),
+                last_heartbeat     = COALESCE(EXCLUDED.last_heartbeat, bot_registry.last_heartbeat)
         """
         params = (
-            self.user_id,
-            self.bot_id,
+            user_id, bot_id,
             status.value,
             effective_pid,
-            started_at,
-            stopped_at,
-            error_message,
-            last_heartbeat,
+            started_at, stopped_at, error_message, last_heartbeat,
         )
         with transaction() as cur:
             cur.execute(sql, params)
 
-    def update_heartbeat(self) -> None:
+    def update_heartbeat(self, user_id: str, bot_id: str) -> None:
         """
-        Fast-path heartbeat update: only touches last_heartbeat and operational_status.
+        Fast-path heartbeat update: only touches last_heartbeat + status.
         Called every HEARTBEAT_INTERVAL_TICKS ticks — must be lightweight.
+        Skips the INSERT / ON CONFLICT overhead of upsert().
         """
         sql = """
             UPDATE bot_registry
@@ -102,44 +122,35 @@ class RegistryRepository:
         """
         now = datetime.now(timezone.utc)
         with transaction() as cur:
-            cur.execute(
-                sql,
-                (now, OperationalStatus.RUNNING.value, self.user_id, self.bot_id),
-            )
+            cur.execute(sql, (now, OperationalStatus.RUNNING.value, user_id, bot_id))
 
-    def mark_error(self, message: str) -> None:
-        """Set status ERROR with error message. Called on BOT_CRASHED."""
-        sql = """
-            UPDATE bot_registry
-            SET operational_status = %s,
-                error_message      = %s,
-                stopped_at         = %s
-            WHERE user_id = %s AND bot_id = %s
+    def update_status(
+        self,
+        user_id: str,
+        bot_id: str,
+        status: str,
+        error_message: Optional[str] = None,
+    ) -> None:
         """
-        now = datetime.now(timezone.utc)
-        with transaction() as cur:
-            cur.execute(
-                sql,
-                (
-                    OperationalStatus.ERROR.value,
-                    message,
-                    now,
-                    self.user_id,
-                    self.bot_id,
-                ),
-            )
+        Semantic shortcut for lifecycle status transitions.
 
-    def mark_stopped(self) -> None:
-        """Set status STOPPED with stopped_at timestamp. Called on clean shutdown."""
-        sql = """
-            UPDATE bot_registry
-            SET operational_status = %s,
-                stopped_at         = %s
-            WHERE user_id = %s AND bot_id = %s
+        Called by HeartbeatEmitter:
+          mark_stopped() → update_status(uid, bid, "STOPPED")
+          mark_error()   → update_status(uid, bid, "ERROR", error_message=msg)
+
+        status: str matching OperationalStatus enum value ("STOPPED", "ERROR", …).
+        Sets stopped_at=now for STOPPED and ERROR; leaves it unchanged otherwise.
         """
+        op_status = OperationalStatus(status)
         now = datetime.now(timezone.utc)
-        with transaction() as cur:
-            cur.execute(
-                sql,
-                (OperationalStatus.STOPPED.value, now, self.user_id, self.bot_id),
-            )
+        stopped_at = (
+            now
+            if op_status in (OperationalStatus.STOPPED, OperationalStatus.ERROR)
+            else None
+        )
+        self.upsert(
+            user_id, bot_id,
+            status=op_status,
+            stopped_at=stopped_at,
+            error_message=error_message,
+        )
