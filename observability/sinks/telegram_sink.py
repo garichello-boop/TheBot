@@ -166,7 +166,12 @@ class TelegramSink(AbstractSink):
         Возвращает текст для отправки или None если нужно подавить.
         По истечении окна — отправляет итоговое сообщение с количеством повторов.
         """
-        key = event.event_type
+        # Ключ дедупликации: event_type + order_id (если есть).
+        # Без order_id BUY fill и SELL fill одного цикла считались одним событием
+        # и второй ORDER_FILLED подавлялся как «дубль».
+        _payload = event.payload or {}
+        order_id = _payload.get("exchange_order_id") or _payload.get("order_id") or ""
+        key = f"{event.event_type}:{order_id}" if order_id else event.event_type
         now = time.monotonic()
 
         with self._dedup_lock:
