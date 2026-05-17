@@ -210,7 +210,7 @@ class PartialFillHandler:
         )
 
         self._emitter.emit(
-            event_type="ORDER_FILLED",
+            event_type="TRADE_APPLIED",
             level="INFO",
             message=f"DCA исполнен: qty={fill.filled_qty}, avg={fill.avg_fill_price}",
             payload={
@@ -262,7 +262,7 @@ class PartialFillHandler:
 
         if fill.is_fully_filled:
             self._emitter.emit(
-                event_type="ORDER_FILLED",
+                event_type="TRADE_APPLIED",
                 level="INFO",
                 message=f"TP полностью исполнен: qty={fill.filled_qty}",
                 payload={
@@ -325,7 +325,7 @@ class PartialFillHandler:
         )
 
         self._emitter.emit(
-            event_type="ORDER_FILLED",
+            event_type="TRADE_APPLIED",
             level="INFO",
             message=f"Вход: qty={fill.filled_qty} @ {fill.avg_fill_price}",
             payload={

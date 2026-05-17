@@ -192,6 +192,16 @@ class CloseProtocol:
         tp_fills = ctx.fills_for_tp
 
         for fill in tp_fills:
+            # Пропустить fill который уже применён partial_fill_handler-ом на этом тике.
+            # last_applied_trade_id выставляется в handle_tp_fill — это гарантия
+            # что заново считать quote_received не нужно.
+            if fill.exchange_order_id == state.last_applied_trade_id:
+                logger.debug(
+                    "CloseProtocol шаги 5-7: fill %s уже применён — пропускаем",
+                    fill.exchange_order_id,
+                )
+                continue
+
             if fill.is_fully_filled or fill.is_partial:
                 received = fill.filled_qty * (fill.avg_fill_price or Decimal(0))
                 new_qty  = state.position_qty - fill.filled_qty
@@ -385,6 +395,14 @@ class CloseProtocol:
         # Шаг 11: PnL
         pnl = state.quote_received - state.quote_spent
 
+        # Захватить до сброса — state после commit будет обнулён
+        log_quote_received = state.quote_received
+        log_quote_spent    = state.quote_spent
+
+        logger.info(
+            "CloseProtocol PnL breakdown: quote_received=%s, quote_spent=%s, pnl=%s",
+            state.quote_received, state.quote_spent, pnl,
+        )
         logger.info(
             "CloseProtocol финализация: cycle_id=%s, pnl=%s",
             state.cycle_id, pnl,
@@ -418,11 +436,11 @@ class CloseProtocol:
             level="INFO",
             message=f"Цикл закрыт: PnL={pnl}",
             payload={
-                "cycle_id":     ctx.bot_state.cycle_id,
-                "pnl":          str(pnl),
-                "quote_spent":  str(ctx.bot_state.quote_spent),
-                "quote_received": str(ctx.bot_state.quote_received),
-                "dca_count":    ctx.bot_state.dca_count,
+                "cycle_id":       ctx.bot_state.cycle_id,
+                "pnl":            str(pnl),
+                "quote_spent":    str(log_quote_spent),
+                "quote_received": str(log_quote_received),
+                "dca_count":      ctx.bot_state.dca_count,
             },
         )
 
