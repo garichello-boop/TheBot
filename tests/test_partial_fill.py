@@ -168,8 +168,8 @@ class TestEntryFill:
         assert new_state.quote_spent == Decimal("0.1") * Decimal("50000.0") + Decimal("5.0")
         assert new_state.active_entry_order_id is None
 
-    def test_full_fill_emits_order_filled(self):
-        """Полное исполнение → эмитируется ORDER_FILLED."""
+    def test_full_fill_emits_trade_applied(self):
+        """Полное исполнение → эмитируется TRADE_APPLIED."""
         handler, sm, om, em = make_handler()
         state = make_entry_state()
         fill = make_fill(OrderType.ENTRY, status=OrderStatus.FILLED)
@@ -177,10 +177,12 @@ class TestEntryFill:
         handler.handle_entry_fill(state, fill)
 
         em.emit.assert_called()
-        event_types = [c.kwargs.get("event_type") or c.args[0]
-                       for c in em.emit.call_args_list
-                       if c.args or c.kwargs]
-        assert any("ORDER_FILLED" in str(et) for et in event_types)
+        event_types = [
+            c.kwargs.get("event_type") or (c.args[0] if c.args else None)
+            for c in em.emit.call_args_list
+            if c.args or c.kwargs
+        ]
+        assert any("TRADE_APPLIED" in str(et) for et in event_types if et is not None)
 
     def test_partial_above_threshold_opens_position(self):
         """Частичное >= порога (80%) → позиция открыта, остаток отменяется."""
@@ -491,8 +493,8 @@ class TestTpFill:
         ]
         assert any("TP_PARTIALLY_FILLED" in et for et in event_types)
 
-    def test_tp_full_fill_emits_order_filled(self):
-        """Полное TP → ORDER_FILLED эмитируется."""
+    def test_tp_full_fill_emits_trade_applied(self):
+        """Полное TP → эмитируется TRADE_APPLIED."""
         handler, sm, om, em = make_handler()
         state = make_position_state(qty=0.1)
         fill = make_fill(
@@ -503,10 +505,11 @@ class TestTpFill:
         handler.handle_tp_fill(state, fill)
 
         event_types = [
-            str(c.kwargs.get("event_type", ""))
+            c.kwargs.get("event_type") or (c.args[0] if c.args else None)
             for c in em.emit.call_args_list
+            if c.args or c.kwargs
         ]
-        assert any("ORDER_FILLED" in et for et in event_types)
+        assert any("TRADE_APPLIED" in str(et) for et in event_types if et is not None)
 
     def test_no_fill_status_returns_no_change(self):
         """CANCELLED fill → состояние не изменяется, should_close=False."""

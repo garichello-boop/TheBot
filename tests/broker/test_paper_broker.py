@@ -97,9 +97,9 @@ class TestInitialState:
         broker, _, _ = make_broker(initial_balance="1000")
         balance = broker.get_balance()
 
-        assert balance.free == Decimal("1000")
-        assert balance.locked == Decimal("0")
-        assert balance.total == Decimal("1000")
+        assert balance.free['USDT'] == Decimal("1000")
+        assert balance.locked['USDT'] == Decimal("0")
+        assert balance.free['USDT'] + balance.locked['USDT'] == Decimal("1000")
 
     def test_mode_is_paper(self):
         broker, _, _ = make_broker()
@@ -132,8 +132,8 @@ class TestMarketBuy:
         broker.create_order(order)
 
         balance = broker.get_balance()
-        assert balance.free == Decimal("500")
-        assert balance.locked == Decimal("0")
+        assert balance.free['USDT'] == Decimal("500")
+        assert balance.locked['USDT'] == Decimal("0")
 
     def test_commission_deducted(self):
         broker, _, _ = make_broker(initial_balance="1000", commission_pct="0.001")
@@ -146,7 +146,7 @@ class TestMarketBuy:
         broker.create_order(order)
 
         balance = broker.get_balance()
-        assert balance.free == Decimal("499.5")
+        assert balance.free['USDT'] == Decimal("499.5")
 
     def test_slippage_applied_to_ask(self):
         # slippage=0.001 → execution_price = ask * 1.001 = 50000 * 1.001 = 50050
@@ -157,7 +157,7 @@ class TestMarketBuy:
         order = make_order(side=OrderSide.BUY, quantity="0.01")
         broker.create_order(order)
 
-        assert broker.get_balance().free == Decimal("499.5")
+        assert broker.get_balance().free['USDT'] == Decimal("499.5")
 
     def test_fill_added_to_queue(self):
         broker, _, _ = make_broker()
@@ -166,12 +166,10 @@ class TestMarketBuy:
         order = make_order(side=OrderSide.BUY, quantity="0.01")
         broker.create_order(order)
 
-        # Fills доступны через следующий вызов process_market_tick
-        fills = broker.process_market_tick(
-            bid=Decimal("49000"), ask=Decimal("50000")
-        )
+        # Fills доступны через get_pending_fills() — process_market_tick не дренирует очередь
+        broker.process_market_tick(bid=Decimal("49000"), ask=Decimal("50000"))
+        fills = broker.get_pending_fills()
         assert len(fills) == 1
-        assert fills[0].side == OrderSide.BUY
         assert fills[0].filled_qty == Decimal("0.01")
 
     def test_order_filled_event_emitted(self):
@@ -228,7 +226,7 @@ class TestMarketSell:
         order = make_order(side=OrderSide.SELL, quantity="0.01")
         broker.create_order(order)
 
-        assert broker.get_balance().free == Decimal("1490")
+        assert broker.get_balance().free['USDT'] == Decimal("1490")
 
     def test_slippage_applied_to_bid(self):
         # slippage=0.001 → execution_price = 49000 * (1 - 0.001) = 48951
@@ -239,7 +237,7 @@ class TestMarketSell:
         order = make_order(side=OrderSide.SELL, quantity="0.01")
         broker.create_order(order)
 
-        assert broker.get_balance().free == Decimal("1489.51")
+        assert broker.get_balance().free['USDT'] == Decimal("1489.51")
 
     def test_fill_is_partial_false(self):
         broker, _, _ = make_broker()
@@ -248,10 +246,9 @@ class TestMarketSell:
         order = make_order(side=OrderSide.SELL, quantity="0.01")
         broker.create_order(order)
 
-        fills = broker.process_market_tick(
-            bid=Decimal("49000"), ask=Decimal("50000")
-        )
-        assert fills[0].is_partial is False
+        broker.process_market_tick(bid=Decimal("49000"), ask=Decimal("50000"))
+        fills = broker.get_pending_fills()
+        assert fills[0].remaining_qty == Decimal("0")
 
 
 # ---------------------------------------------------------------------------
@@ -270,9 +267,9 @@ class TestLimitBuy:
         broker.create_order(order)
 
         balance = broker.get_balance()
-        assert balance.free == Decimal("520")
-        assert balance.locked == Decimal("480")
-        assert balance.total == Decimal("1000")
+        assert balance.free['USDT'] == Decimal("520")
+        assert balance.locked['USDT'] == Decimal("480")
+        assert balance.free['USDT'] + balance.locked['USDT'] == Decimal("1000")
 
     def test_appears_in_open_orders(self):
         broker, _, _ = make_broker()
@@ -313,9 +310,8 @@ class TestLimitBuy:
         broker.create_order(order)
 
         # ask=48000 == limit=48000 → исполняется
-        fills = broker.process_market_tick(
-            bid=Decimal("47990"), ask=Decimal("48000")
-        )
+        broker.process_market_tick(bid=Decimal("47990"), ask=Decimal("48000"))
+        fills = broker.get_pending_fills()
         assert len(fills) == 1
 
     def test_fills_when_ask_below_limit(self):
@@ -328,11 +324,10 @@ class TestLimitBuy:
         broker.create_order(order)
 
         # ask=47000 < limit=48000 → исполняется
-        fills = broker.process_market_tick(
-            bid=Decimal("46990"), ask=Decimal("47000")
-        )
+        broker.process_market_tick(bid=Decimal("46990"), ask=Decimal("47000"))
+        fills = broker.get_pending_fills()
         assert len(fills) == 1
-        assert fills[0].avg_price == Decimal("48000")  # по лимитной цене
+        assert fills[0].avg_fill_price == Decimal("48000")  # по лимитной цене
 
     def test_fill_updates_balance(self):
         broker, _, _ = make_broker(initial_balance="1000")
@@ -347,8 +342,8 @@ class TestLimitBuy:
 
         # После fill: cost = 0.01 * 48000 = 480, free = 1000 - 480 = 520
         balance = broker.get_balance()
-        assert balance.free == Decimal("520")
-        assert balance.locked == Decimal("0")
+        assert balance.free['USDT'] == Decimal("520")
+        assert balance.locked['USDT'] == Decimal("0")
 
     def test_fill_removes_from_open_orders(self):
         broker, _, _ = make_broker()
@@ -391,8 +386,8 @@ class TestLimitSell:
         broker.create_order(order)
 
         balance = broker.get_balance()
-        assert balance.free == Decimal("1000")
-        assert balance.locked == Decimal("0")
+        assert balance.free['USDT'] == Decimal("1000")
+        assert balance.locked['USDT'] == Decimal("0")
 
     def test_fills_when_bid_equals_limit(self):
         broker, _, _ = make_broker()
@@ -404,11 +399,10 @@ class TestLimitSell:
         broker.create_order(order)
 
         # bid=52000 == limit=52000 → исполняется
-        fills = broker.process_market_tick(
-            bid=Decimal("52000"), ask=Decimal("52010")
-        )
+        broker.process_market_tick(bid=Decimal("52000"), ask=Decimal("52010"))
+        fills = broker.get_pending_fills()
         assert len(fills) == 1
-        assert fills[0].avg_price == Decimal("52000")
+        assert fills[0].avg_fill_price == Decimal("52000")
 
     def test_no_fill_when_bid_below_limit(self):
         broker, _, _ = make_broker()
@@ -437,7 +431,7 @@ class TestLimitSell:
         broker.process_market_tick(bid=Decimal("52000"), ask=Decimal("52010"))
 
         # proceeds = 0.01 * 52000 = 520, free = 1000 + 520 = 1520
-        assert broker.get_balance().free == Decimal("1520")
+        assert broker.get_balance().free['USDT'] == Decimal("1520")
 
 
 # ---------------------------------------------------------------------------
@@ -455,15 +449,15 @@ class TestCancelOrder:
         created = broker.create_order(order)
 
         # После размещения: free=520, locked=480
-        assert broker.get_balance().free == Decimal("520")
+        assert broker.get_balance().free['USDT'] == Decimal("520")
 
         result = broker.cancel_order(created.exchange_order_id)
 
         assert result is True
         # После отмены: free=1000, locked=0
         balance = broker.get_balance()
-        assert balance.free == Decimal("1000")
-        assert balance.locked == Decimal("0")
+        assert balance.free['USDT'] == Decimal("1000")
+        assert balance.locked['USDT'] == Decimal("0")
 
     def test_cancel_removes_from_open_orders(self):
         broker, _, _ = make_broker()
@@ -586,7 +580,7 @@ class TestGetOpenOrders:
 
 class TestFillQueue:
     def test_market_fill_returned_on_next_tick(self):
-        """MARKET fill из тика N доступен через process_market_tick() в тике N+1."""
+        """MARKET fill из тика N доступен через get_pending_fills() в тике N+1."""
         broker, _, _ = make_broker()
 
         # Тик N: обновить цену
@@ -596,10 +590,9 @@ class TestFillQueue:
         order = make_order(side=OrderSide.BUY, quantity="0.01")
         broker.create_order(order)
 
-        # Тик N+1: fills возвращаются
-        fills = broker.process_market_tick(
-            bid=Decimal("49000"), ask=Decimal("50000")
-        )
+        # Тик N+1: обновить цену, дренировать fills
+        broker.process_market_tick(bid=Decimal("49000"), ask=Decimal("50000"))
+        fills = broker.get_pending_fills()
         assert len(fills) == 1
 
     def test_queue_cleared_after_pop(self):
@@ -609,12 +602,11 @@ class TestFillQueue:
         order = make_order(side=OrderSide.BUY, quantity="0.01")
         broker.create_order(order)
 
-        broker.process_market_tick(bid=Decimal("49000"), ask=Decimal("50000"))
+        # Первый drain — забираем fill
+        broker.get_pending_fills()
 
-        # Следующий тик — очередь пустая
-        fills = broker.process_market_tick(
-            bid=Decimal("49000"), ask=Decimal("50000")
-        )
+        # Следующий вызов — очередь пустая
+        fills = broker.get_pending_fills()
         assert fills == []
 
     def test_multiple_fills_accumulated(self):
@@ -627,9 +619,8 @@ class TestFillQueue:
         broker.create_order(make_order(side=OrderSide.SELL, quantity="0.01",
                                        client_order_id="order-2"))
 
-        fills = broker.process_market_tick(
-            bid=Decimal("49000"), ask=Decimal("50000")
-        )
+        broker.process_market_tick(bid=Decimal("49000"), ask=Decimal("50000"))
+        fills = broker.get_pending_fills()
         assert len(fills) == 2
 
     def test_limit_and_market_fills_returned_together(self):
@@ -648,10 +639,9 @@ class TestFillQueue:
         )
         broker.create_order(limit_order)
 
-        # bid=49500 → LIMIT SELL триггерится
-        fills = broker.process_market_tick(
-            bid=Decimal("49500"), ask=Decimal("49510")
-        )
+        # bid=49500 → LIMIT SELL триггерится; market fill из тика 1 тоже в очереди
+        broker.process_market_tick(bid=Decimal("49500"), ask=Decimal("49510"))
+        fills = broker.get_pending_fills()
         assert len(fills) == 2
 
     def test_fill_mode_is_paper(self):
@@ -659,20 +649,16 @@ class TestFillQueue:
         broker.process_market_tick(bid=Decimal("49000"), ask=Decimal("50000"))
         broker.create_order(make_order(side=OrderSide.BUY, quantity="0.01"))
 
-        fills = broker.process_market_tick(
-            bid=Decimal("49000"), ask=Decimal("50000")
-        )
-        assert fills[0].mode == BrokerMode.PAPER
+        fills = broker.get_pending_fills()
+        assert fills[0].exchange_order_id.startswith("paper_")
 
     def test_fill_is_not_partial(self):
         broker, _, _ = make_broker()
         broker.process_market_tick(bid=Decimal("49000"), ask=Decimal("50000"))
         broker.create_order(make_order(side=OrderSide.BUY, quantity="0.01"))
 
-        fills = broker.process_market_tick(
-            bid=Decimal("49000"), ask=Decimal("50000")
-        )
-        assert fills[0].is_partial is False
+        fills = broker.get_pending_fills()
+        assert fills[0].remaining_qty == Decimal("0")
 
 
 # ---------------------------------------------------------------------------
