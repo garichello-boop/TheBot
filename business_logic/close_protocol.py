@@ -38,6 +38,7 @@ from dataclasses import replace
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
+from bot_state.models import ClosingReason
 from .errors import StopCraneError
 from .types import OrderStatus
 
@@ -79,6 +80,7 @@ class CloseProtocol:
         close_remainder_timeout_sec: int,
         max_market_close_slippage_pct: Decimal,
         cooldown_sec: int,
+        sl_max_market_slippage_pct: Decimal = Decimal("1.0"),
     ) -> None:
         self._broker                        = broker
         self._order_manager                 = order_manager
@@ -90,6 +92,7 @@ class CloseProtocol:
         self._close_remainder_timeout_sec   = close_remainder_timeout_sec
         self._max_market_close_slippage_pct = max_market_close_slippage_pct
         self._cooldown_sec                  = cooldown_sec
+        self._sl_max_market_slippage_pct    = sl_max_market_slippage_pct
 
     # ------------------------------------------------------------------
     # Публичный API
@@ -238,10 +241,27 @@ class CloseProtocol:
         """
         Шаг 9: Применить CLOSE_REMAINDER_MODE к остатку позиции.
 
-        KEEP_TP           — TP остаётся висеть. Ничего не делаем.
-        LIMIT_WITH_TIMEOUT — проверяем timeout и переходим к следующему режиму.
-        MARKET            — закрываем market-ордером если slippage приемлем.
+        SL override (ТЗ-7 StopLoss §7):
+          Если closing_reason == SL — принудительно MARKET, независимо от
+          CLOSE_REMAINDER_MODE. Используется SL_MAX_MARKET_SLIPPAGE_PCT.
+          Превышение slippage → SL_CLOSE_BLOCKED emit + STOP_CRANE.
+          Нет таймаута ожидания — SL требует немедленного закрытия.
+
+        Нормальные режимы:
+          KEEP_TP           — TP остаётся висеть. Ничего не делаем.
+          LIMIT_WITH_TIMEOUT — проверяем timeout и переходим к следующему режиму.
+          MARKET            — закрываем market-ордером если slippage приемлем.
         """
+        # SL override — всегда MARKET независимо от CLOSE_REMAINDER_MODE
+        if state.closing_reason == ClosingReason.SL:
+            logger.info(
+                "CloseProtocol шаг 9: SL override — форсируем MARKET close "
+                "(position_qty=%s, sl_max_slippage=%.2f%%)",
+                state.position_qty, float(self._sl_max_market_slippage_pct),
+            )
+            return self._handle_sl_market_close(ctx, state)
+
+        # Нормальная политика
         if self._close_remainder_mode == "KEEP_TP":
             logger.debug(
                 "CloseProtocol шаг 9: KEEP_TP — TP висит на остаток %s",
@@ -258,6 +278,94 @@ class CloseProtocol:
         logger.warning(
             "Неизвестный CLOSE_REMAINDER_MODE=%s — применяем KEEP_TP",
             self._close_remainder_mode,
+        )
+        return state
+
+    def _handle_sl_market_close(
+        self,
+        ctx: "TickContext",
+        state: "BotState",
+    ) -> "BotState":
+        """
+        SL MARKET close: закрыть остаток позиции по рынку.
+
+        Отличия от _handle_market_close():
+          - Использует _sl_max_market_slippage_pct (жёсткий лимит оператора).
+          - При превышении slippage → emit SL_CLOSE_BLOCKED + STOP_CRANE.
+            (обычный MARKET только пропускает тик и ждёт следующего).
+          - Нет fallback на KEEP_TP — SL требует обязательного закрытия.
+        """
+        bid = ctx.price_data.bid
+        avg = state.position_avg_price
+
+        if avg is not None and avg > 0:
+            slippage_pct = abs(avg - bid) / avg * 100
+            if slippage_pct > self._sl_max_market_slippage_pct:
+                self._emitter.emit(
+                    event_type="SL_CLOSE_BLOCKED",
+                    level="CRITICAL",
+                    message=(
+                        f"SL рыночное закрытие заблокировано: "
+                        f"slippage {slippage_pct:.2f}% > "
+                        f"SL_MAX_MARKET_SLIPPAGE_PCT={self._sl_max_market_slippage_pct}%"
+                    ),
+                    payload={
+                        "required_slippage_pct": str(slippage_pct),
+                        "max_slippage_pct":       str(self._sl_max_market_slippage_pct),
+                        "bid":                    str(bid),
+                        "avg_price":              str(avg),
+                        "spread":                 str(ctx.price_data.ask - bid),
+                        "cycle_id":               state.cycle_id,
+                    },
+                )
+                raise StopCraneError(
+                    f"SL_CLOSE_BLOCKED: slippage {slippage_pct:.2f}% > "
+                    f"SL_MAX_MARKET_SLIPPAGE_PCT={self._sl_max_market_slippage_pct}%",
+                    invariant="sl_close_slippage_within_limit",
+                    expected={"slippage_pct": f"<= {self._sl_max_market_slippage_pct}%"},
+                    actually_found={"slippage_pct": str(slippage_pct)},
+                    db_state={
+                        "cycle_id":       state.cycle_id,
+                        "closing_reason": str(state.closing_reason),
+                        "position_qty":   str(state.position_qty),
+                        "avg_price":      str(avg),
+                    },
+                )
+
+        # Отменяем TP перед рыночным закрытием
+        if state.active_tp_order_id:
+            try:
+                self._order_manager.cancel_order(
+                    state.active_tp_order_id, order_role="TP"
+                )
+                state = self._state_manager.commit(
+                    state,
+                    replace(state, active_tp_order_id=None),
+                )
+            except StopCraneError:
+                raise  # нельзя закрывать без отмены TP
+            except Exception as exc:
+                logger.warning("Не удалось отменить TP перед SL MARKET close: %s", exc)
+
+        # MARKET SELL на весь остаток
+        _, state = self._order_manager.place_tp_order(
+            state,
+            qty=state.position_qty,
+            price=bid,
+            ticker=ctx.ticker,
+            cycle_id=state.cycle_id or "",
+        )
+
+        self._emitter.emit(
+            event_type="ORDER_CREATED",
+            level="WARNING",
+            message=f"SL market close: {state.position_qty} @ ~{bid}",
+            payload={
+                "qty":    str(state.position_qty),
+                "price":  str(bid),
+                "mode":   "MARKET",
+                "reason": "sl_close",
+            },
         )
         return state
 
@@ -396,22 +504,26 @@ class CloseProtocol:
         pnl = state.quote_received - state.quote_spent
 
         # Захватить до сброса — state после commit будет обнулён
-        log_quote_received = state.quote_received
-        log_quote_spent    = state.quote_spent
+        log_quote_received  = state.quote_received
+        log_quote_spent     = state.quote_spent
+        closing_reason_snap = state.closing_reason  # для CYCLE_CLOSED payload
 
         logger.info(
             "CloseProtocol PnL breakdown: quote_received=%s, quote_spent=%s, pnl=%s",
             state.quote_received, state.quote_spent, pnl,
         )
         logger.info(
-            "CloseProtocol финализация: cycle_id=%s, pnl=%s",
-            state.cycle_id, pnl,
+            "CloseProtocol финализация: cycle_id=%s, pnl=%s, closing_reason=%s",
+            state.cycle_id, pnl, closing_reason_snap,
         )
 
         # Шаг 12: Финальный чеклист
         self._final_checklist(ctx, state)
 
         # Шаг 13: FSM → IDLE
+        # closing_reason сбрасывается здесь явно (дополнительная защита к
+        # auto-reset в StateManager.transition(), которая не применяется
+        # т.к. используем commit() с replace()).
         state = self._state_manager.commit(
             state,
             replace(
@@ -428,6 +540,7 @@ class CloseProtocol:
                 active_dca_order_ids=(),
                 pending_client_order_id=None,
                 last_applied_trade_id=None,
+                closing_reason=None,   # явный сброс
             ),
         )
 
@@ -441,6 +554,7 @@ class CloseProtocol:
                 "quote_spent":    str(log_quote_spent),
                 "quote_received": str(log_quote_received),
                 "dca_count":      ctx.bot_state.dca_count,
+                "closing_reason": closing_reason_snap.value if closing_reason_snap else None,
             },
         )
 
@@ -472,16 +586,21 @@ class CloseProtocol:
                 f"active_dca_order_ids не пусты: {state.active_dca_order_ids}"
             )
 
-        # Проверяем нет ли открытых ордеров по тикеру
+        # Проверяем нет ли открытых ордеров по тикеру.
+        # open_orders содержит OpenOrder (dataclass), не dict — атрибутный доступ.
         open_orders = ctx.open_orders
-        cycle_id = state.cycle_id or ""
-        cycle_orders = [
-            o for o in open_orders
-            if o.get("cycle_id") == cycle_id or o.get("symbol") == ctx.ticker
-        ]
+        # Поддержка как объектов с атрибутами (production), так и dict (тесты).
+        # Матчинг по ticker ИЛИ cycle_id — ловим ордера текущего цикла
+        # независимо от того как брокер их отдаёт.
+        def _match(o):
+            if isinstance(o, dict):
+                return o.get("ticker") == ctx.ticker or o.get("cycle_id") == state.cycle_id
+            return (getattr(o, "ticker", None) == ctx.ticker
+                    or getattr(o, "cycle_id", None) == state.cycle_id)
+        cycle_orders = [o for o in open_orders if _match(o)]
         if cycle_orders:
             errors.append(
-                f"На бирже остались ордеры: {[o.get('orderId') for o in cycle_orders]}"
+                f"На бирже остались ордеры: {[getattr(o, 'exchange_order_id', str(o)) for o in cycle_orders]}"
             )
 
         if errors:

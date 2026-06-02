@@ -215,6 +215,19 @@ class BotLoopSettings(BaseSettings):
             "Если хуже — ордер откладывается."
         ),
     )
+    sl_max_market_slippage_pct: float = Field(
+        default=1.0,
+        ge=0.0,
+        le=100.0,
+        description=(
+            "Максимально допустимое проскальзывание при рыночном закрытии "
+            "по Stop-Loss (%). Жёсткий риск-лимит оператора — при превышении "
+            "emit SL_CLOSE_BLOCKED и STOP_CRANE. "
+            "Выше чем max_market_close_slippage_pct: SL — аварийный выход, "
+            "небольшое проскальзывание допустимо. "
+            "Env: BOT_LOOP_SL_MAX_MARKET_SLIPPAGE_PCT"
+        ),
+    )
 
     # ------------------------------------------------------------------
     # Надёжность

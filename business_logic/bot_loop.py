@@ -46,6 +46,7 @@ from .retry_manager import RetryManager
 from .strategy import BaseStrategy
 from .tick_context import TickContext
 from .types import DecisionAction, FillEvent, OrderType
+from bot_state.models import ClosingReason, CycleStatus
 
 if TYPE_CHECKING:
     from broker import IBroker
@@ -134,6 +135,9 @@ class BotLoop:
                 str(settings.max_market_close_slippage_pct)
             ),
             cooldown_sec=settings.cooldown_sec,
+            sl_max_market_slippage_pct=Decimal(
+                str(settings.sl_max_market_slippage_pct)
+            ),
         )
         self._decision_engine = DecisionEngine(
             max_entry_slippage_pct=Decimal(str(settings.max_entry_slippage_pct)),
@@ -152,6 +156,7 @@ class BotLoop:
             emitter=emitter,
             check_interval_ticks=10,
             balance_drift_pct=Decimal(str(settings.balance_drift_pct)),
+            paper_mode=(broker.get_mode().value == "PAPER"),
         )
         self._heartbeat = HeartbeatEmitter(
             registry_repo=registry_repo,
@@ -416,16 +421,18 @@ class BotLoop:
                 # TP >= порога → запускаем Close Protocol
                 state = self._state_manager.commit(
                     state,
-                    replace(state, cycle_status="CLOSING"),
+                    replace(state, cycle_status="CLOSING",
+                            closing_reason=ClosingReason.TP),
                 )
                 self._emitter.emit(
                     event_type="CYCLE_STATUS_CHANGED",
                     level="INFO",
                     message="IN_POSITION → CLOSING",
                     payload={
-                        "from": "IN_POSITION",
-                        "to":   "CLOSING",
-                        "reason": "tp_filled_above_threshold",
+                        "from":           "IN_POSITION",
+                        "to":             "CLOSING",
+                        "reason":         "tp_filled_above_threshold",
+                        "closing_reason": "TP",
                     },
                 )
 
@@ -477,6 +484,9 @@ class BotLoop:
 
         elif action == DecisionAction.RETRY_LIQUIDITY:
             return self._execute_retry_liquidity(ctx, state, decision, signal)
+
+        elif action == DecisionAction.INITIATE_SL_CLOSE:
+            return self._execute_sl_close(ctx, state, decision)
 
         elif action == DecisionAction.STOP_CRANE:
             if decision.stop_crane_error:
@@ -559,15 +569,30 @@ class BotLoop:
     def _execute_place_tp(
         self, ctx: TickContext, state: "BotState", signal
     ) -> "BotState":
-        """PLACE_TP: выставить TP после исполнения entry."""
-        if signal.tp_price is None:
-            logger.warning("PLACE_TP: signal.tp_price=None — пропускаем")
+        """PLACE_TP: выставить TP после исполнения entry.
+
+        tp_price может быть None если DecisionEngine передал None
+        (Strategy пересчитает на основе avg_price). В этом случае
+        запрашиваем TP-цену у стратегии напрямую — аналогично
+        _execute_replace_tp.
+        """
+        tp_price = signal.tp_price
+        if tp_price is None:
+            recalc = self._strategy.evaluate(
+                ctx.price_data,
+                self._cycle_snapshot or _empty_snapshot(ctx.bot_config.strategy_params),
+                state.position_qty,
+            )
+            tp_price = recalc.tp_price
+
+        if tp_price is None:
+            logger.warning("PLACE_TP: tp_price=None даже после пересчёта стратегии — пропускаем")
             return state
 
         _, state = self._order_manager.place_tp_order(
             state,
             qty=state.position_qty,
-            price=signal.tp_price,
+            price=tp_price,
             ticker=ctx.ticker,
             cycle_id=state.cycle_id or "",
         )
@@ -713,8 +738,15 @@ class BotLoop:
             },
         )
 
+        # Устанавливаем closing_reason перед запуском Close Protocol
+        if state.cycle_status != "CLOSING":
+            state = self._state_manager.commit(
+                state,
+                replace(state, cycle_status="CLOSING",
+                        closing_reason=ClosingReason.FORCE_CLOSE),
+            )
+
         # Используем CloseProtocol с mode=MARKET
-        # Предварительно переключаем close_remainder_mode
         original_mode = self._close_protocol._close_remainder_mode  # noqa: SLF001
         self._close_protocol._close_remainder_mode = "MARKET"  # noqa: SLF001
         try:
@@ -723,6 +755,58 @@ class BotLoop:
             self._close_protocol._close_remainder_mode = original_mode  # noqa: SLF001
 
         self._cycle_snapshot = None
+        return state
+
+    def _execute_sl_close(
+        self, ctx: TickContext, state: "BotState", decision
+    ) -> "BotState":
+        """
+        INITIATE_SL_CLOSE: стоп-лосс сработал.
+
+        Последовательность (ТЗ-7 StopLoss §6):
+          1. Emit SL_TRIGGERED с диагностическим payload.
+          2. FSM IN_POSITION → CLOSING с closing_reason=SL.
+          3. Close Protocol — шаг 9 видит closing_reason=SL и форсирует
+             MARKET с проверкой SL_MAX_MARKET_SLIPPAGE_PCT.
+        """
+        params     = ctx.bot_config.strategy_params
+        sl_pct     = params.get("SL_PCT", 0)
+        avg_price  = state.position_avg_price or Decimal(0)
+        current_bid = ctx.price_data.bid
+        sl_price   = avg_price * (1 - Decimal(str(sl_pct)) / 100) if avg_price > 0 else Decimal(0)
+        loss_pct   = (avg_price - current_bid) / avg_price * 100 if avg_price > 0 else Decimal(0)
+
+        self._emitter.emit(
+            event_type="SL_TRIGGERED",
+            level="WARNING",
+            message=(
+                f"Stop-loss сработал: bid={current_bid} <= sl_level={sl_price:.4f} "
+                f"(loss={loss_pct:.2f}%)"
+            ),
+            payload={
+                "sl_price":   str(sl_price),
+                "current_bid": str(current_bid),
+                "avg_price":  str(avg_price),
+                "sl_pct":     sl_pct,
+                "loss_pct":   str(loss_pct.quantize(Decimal("0.01"))),
+                "cycle_id":   state.cycle_id,
+            },
+        )
+
+        # FSM → CLOSING с причиной SL
+        state = self._state_manager.transition(
+            state,
+            CycleStatus.CLOSING,
+            closing_reason=ClosingReason.SL,
+        )
+
+        # Close Protocol: шаг 9 обнаружит closing_reason=SL и форсирует MARKET
+        state, status = self._close_protocol.run(ctx, state)
+
+        if status == "COMPLETE":
+            self._cycle_snapshot = None
+            logger.info("SL Close Protocol завершён — FSM в IDLE")
+
         return state
 
     def _execute_set_close_only(

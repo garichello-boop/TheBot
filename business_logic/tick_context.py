@@ -150,6 +150,12 @@ class TickContext:
           1. tick_start_mono — до всего, чтобы Watchdog мерил полный тик.
           2. bot_config      — нужен ticker для price_data и state.
           3. price_data      — если MarketDataUnavailable → RecoverableError.
+          3.5 process_market_tick — передать свежую цену в PaperBroker ДО
+                               дренажа fills. Без этого LIMIT ордера не
+                               исполняются: _check_and_execute_limits()
+                               работает с устаревшим _last_bid/_last_ask.
+                               hasattr-проверка: BybitBroker метод не имеет,
+                               вызов безопасен для любого брокера.
           4. open_orders     — для reconciliation.
           5. order_events    — дренируем очередь до balance (атомарность).
           6. balance         — текущий баланс.
@@ -177,6 +183,13 @@ class TickContext:
             raise RecoverableError(
                 f"Рыночные данные недоступны: {exc}"
             ) from exc
+
+        # --- 3.5. Обновить PaperBroker актуальной ценой -----------------
+        # Необходимо чтобы LIMIT ордера проверялись против свежей цены
+        # перед дренажом fills на шаге 5.
+        # BybitBroker этот метод не имеет — hasattr делает вызов безопасным.
+        if hasattr(broker, 'process_market_tick'):
+            broker.process_market_tick(price_data.bid, price_data.ask)
 
         # --- 4. Open orders ----------------------------------------------
         try:

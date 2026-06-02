@@ -313,10 +313,9 @@ class PaperBroker(IBroker):
         self._last_bid = bid
         self._last_ask = ask
         self._check_and_execute_limits(bid, ask)
-
-        fills = list(self._fill_queue)
-        self._fill_queue.clear()
-        return fills
+        # Fills накапливаются в _fill_queue для get_pending_fills().
+        # process_market_tick() не дренирует очередь — дренаж только в get_pending_fills().
+        return []
 
     def register_order_role(self, exchange_order_id: str, role: str) -> None:
         """
@@ -427,7 +426,7 @@ class PaperBroker(IBroker):
         logger.debug(
             "PaperBroker LIMIT pending: %s %s qty=%s @ %s "
             "(order_id=%s, locked=%.4f USDT)",
-            order.side.value, order.ticker,
+            (order.side if isinstance(order.side, str) else order.side.value), order.ticker,
             order.quantity, order.price,
             order_id, float(lock_amount),
         )
@@ -474,11 +473,12 @@ class PaperBroker(IBroker):
         """
         commission = request.quantity * execution_price * self._commission_pct
         ts = time.time()
+        side_str = request.side if isinstance(request.side, str) else request.side.value
 
         if locked_to_release > Decimal("0"):
             self._unlock_usdt(locked_to_release)
 
-        if request.side == OrderSide.BUY:
+        if side_str == "BUY":
             total_cost = request.quantity * execution_price + commission
             self._free_usdt -= total_cost
             # Обновить кэш цен из фактической цены исполнения
@@ -501,25 +501,26 @@ class PaperBroker(IBroker):
             is_partial=False,
         )
 
-        try:
-            self._trade_repo.save_fill(fill, bot_id=self._bot_id)
-        except Exception as exc:
-            logger.error(
-                "PaperBroker: ошибка сохранения fill в БД (order_id=%s): %s",
-                order_id, exc,
-            )
+        if self._trade_repo is not None:
+            try:
+                self._trade_repo.save_fill(fill, bot_id=self._bot_id)
+            except Exception as exc:
+                logger.error(
+                    "PaperBroker: ошибка сохранения fill в БД (order_id=%s): %s",
+                    order_id, exc,
+                )
 
         self._emitter.emit(
             event_type="ORDER_FILLED",
             level="INFO",
             message=(
-                f"[PAPER] {request.side.value} {request.quantity} {request.ticker} "
+                f"[PAPER] {side_str} {request.quantity} {request.ticker} "
                 f"@ {execution_price:.4f} | комиссия={commission:.4f}"
             ),
             payload={
                 "exchange_order_id": order_id,
                 "client_order_id": request.client_order_id,
-                "side": request.side.value,
+                "side": side_str,
                 "filled_qty": str(request.quantity),
                 "avg_price": str(execution_price),
                 "commission": str(commission),
@@ -534,7 +535,7 @@ class PaperBroker(IBroker):
         logger.info(
             "PaperBroker fill: %s %s qty=%s @ %s | комиссия=%s | "
             "баланс=%.4f free / %.4f locked",
-            request.side.value, request.ticker,
+            side_str, request.ticker,
             request.quantity, execution_price, commission,
             float(self._free_usdt), float(self._locked_usdt),
         )

@@ -3,7 +3,7 @@ tests/bot_config/helpers.py
 
 Plain helper functions for bot_config tests.
 No pytest fixtures, no bot_config imports — only stdlib.
-Imported directly by test modules: `from helpers import make_row`
+Imported directly by test modules: `from .helpers import make_row`
 
 This file exists separately from conftest.py so that test modules can
 import make_row without triggering any bot_config package initialization

@@ -22,6 +22,8 @@ _TELEGRAM_EVENT_TYPES = frozenset({
     "TP_CREATED", "TP_FILLED",
     # Аварийные
     "STOP_CRANE_TRIGGERED", "KILL_SWITCH_TRIGGERED",
+    # Stop-Loss
+    "SL_TRIGGERED",
     # Инфраструктура
     "CREDENTIALS_MISSING", "CREDENTIALS_INVALID",
     "STATE_SAVE_FAILED",

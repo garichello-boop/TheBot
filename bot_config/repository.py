@@ -245,10 +245,14 @@ class ConfigRepository:
 
         # Borrow a pool connection only to read its DSN, then open our own.
         # See ADR-001: the lock connection must not be returned to the pool.
-        with get_connection() as pool_conn:
-            dsn = pool_conn.dsn
-
-        self._lock_conn = psycopg2.connect(dsn)
+        import os
+        self._lock_conn = psycopg2.connect(
+            host=os.getenv("DB_HOST", "localhost"),
+            port=int(os.getenv("DB_PORT", "5432")),
+            dbname=os.getenv("DB_NAME", "thebot"),
+            user=os.getenv("DB_USER", "postgres"),
+            password=os.getenv("DB_PASSWORD", "mypassword123"),
+        )
         self._lock_conn.autocommit = True
 
         with self._lock_conn.cursor() as cur:

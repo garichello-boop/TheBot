@@ -135,6 +135,10 @@ class DecisionAction(str, Enum):
     SET_CLOSE_ONLY     — установить bot_configs.status=CLOSE_ONLY (ручная отмена TP/DCA).
     RETRY_LIQUIDITY    — повторить ордер после WAITING_FOR_LIQUIDITY паузы.
     STOP_CRANE         — заблокировать торговлю (неизвестный исход / аномалия).
+    INITIATE_SL_CLOSE  — SL сработал: инициировать закрытие позиции по рынку.
+                         Обрабатывается в bot_loop._execute_sl_close().
+                         Close Protocol шаг 9 форсирует MARKET при
+                         closing_reason=SL независимо от CLOSE_REMAINDER_MODE.
     """
     WAIT             = "WAIT"
     ENTER            = "ENTER"
@@ -148,6 +152,7 @@ class DecisionAction(str, Enum):
     SET_CLOSE_ONLY   = "SET_CLOSE_ONLY"
     RETRY_LIQUIDITY  = "RETRY_LIQUIDITY"
     STOP_CRANE       = "STOP_CRANE"
+    INITIATE_SL_CLOSE = "INITIATE_SL_CLOSE"
 
 
 @dataclass(frozen=True)

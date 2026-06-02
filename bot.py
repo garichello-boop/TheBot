@@ -45,10 +45,13 @@ from __future__ import annotations
 import argparse
 import getpass
 import logging
+import os
 import sys
 
 logger = logging.getLogger(__name__)
 
+from dotenv import load_dotenv
+load_dotenv()
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -116,9 +119,9 @@ def main() -> None:
     # 3. KeyManager (П1) — мастер-пароль вводится один раз
     # ------------------------------------------------------------------
     try:
-        from key_manager import KeyManager  # noqa: PLC0415
+        from keys.key_manager import KeyManager  # noqa: PLC0415
         km = KeyManager()
-        master_password = getpass.getpass("Введите мастер-пароль: ")
+        master_password = os.environ.get("BOT_MASTER_PASSWORD") or getpass.getpass("Введите мастер-пароль: ")
         km.load(master_password)
         del master_password  # не держать в памяти дольше чем нужно
     except Exception as exc:
@@ -127,16 +130,16 @@ def main() -> None:
 
     # ------------------------------------------------------------------
     # 4. Observability (П3)
+    #    Эмиттер стартует рано — все ошибки старта идут в Telegram.
+    #    Тикер уточняется сразу после загрузки BotConfig (шаг 6).
     # ------------------------------------------------------------------
     try:
         from observability import setup_observability  # noqa: PLC0415
 
-        # Тикер для контекста событий — узнаем из bot_configs позже,
-        # пока используем placeholder; EventEmitter обновит при первом emit
         emitter = setup_observability(
             settings=settings,
             bot_id=bot_id,
-            ticker="UNKNOWN",           # будет уточнён после загрузки BotConfig
+            ticker="",   # уточняется в шаге 6 через emitter.set_ticker()
             tg_token=km.get("TG_BOT_TOKEN"),
             tg_chat_id=km.get("TG_CHAT_ID"),
         )
@@ -148,8 +151,8 @@ def main() -> None:
     # 5. База данных — пул соединений
     # ------------------------------------------------------------------
     try:
-        from db import create_pool  # noqa: PLC0415
-        db_pool = create_pool(settings.database)
+        from db import init_pool as create_pool  # noqa: PLC0415
+        db_pool = create_pool(settings.database.url)
     except Exception as exc:
         logger.critical("Не удалось подключиться к PostgreSQL: %s", exc)
         emitter.emit(
@@ -171,6 +174,9 @@ def main() -> None:
         # Первичная загрузка конфига — SELECT FOR UPDATE (защита от двойного запуска)
         bot_config = config_watcher.get_config()
         ticker     = bot_config.ticker
+
+        # Обновляем тикер в эмиттере — все последующие события будут с правильным тикером
+        emitter.set_ticker(ticker)
 
         logger.info(
             "Конфиг загружен: ticker=%s, strategy=%s, status=%s, version=%d",
@@ -195,12 +201,17 @@ def main() -> None:
     # 7. Брокер (П4)
     # ------------------------------------------------------------------
     try:
-        from broker import BrokerFactory  # noqa: PLC0415
-        broker = BrokerFactory.create(
-            settings.broker,
-            token=km.get("BYBIT_API_KEY") if settings.broker.broker_type == "bybit" else None,
-            secret=km.get("BYBIT_API_SECRET") if settings.broker.broker_type == "bybit" else None,
+        from broker.broker_factory import BrokerFactory
+        bundle = BrokerFactory.create(
+            settings=settings,
+            key_manager=km,
+            emitter=emitter,
+            trade_repo=None,
+            bot_id=bot_id,
         )
+        broker = bundle.broker
+        tracker = bundle.tracker
+        bundle.start()
         logger.info("Брокер инициализирован: %s", settings.broker.broker_type)
     except Exception as exc:
         logger.critical("Не удалось инициализировать брокер: %s", exc)
@@ -268,6 +279,7 @@ def main() -> None:
         StateRecovery.startup(
             user_id=user_id,
             bot_id=bot_id,
+            ticker=ticker,
             broker=broker,
             state_repo=state_repo,
             state_manager=state_manager,
@@ -275,6 +287,7 @@ def main() -> None:
             emitter=emitter,
             virtual_balance=bot_config.virtual_balance,
         )
+
         logger.info("StateRecovery завершён — готов к торговле")
     except RuntimeError as exc:
         # RuntimeError от StateRecovery — например, бот уже запущен
@@ -350,6 +363,10 @@ def main() -> None:
         sys.exit(1)
     finally:
         # Корректное завершение подсистем
+        try:
+            registry_repo.update_status(user_id, bot_id, operational_status="STOPPED")
+        except Exception:
+            pass
         try:
             market.stop()
         except Exception:

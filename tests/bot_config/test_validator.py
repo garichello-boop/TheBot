@@ -3,7 +3,7 @@ import pytest
 
 from bot_config.models import BotConfig, BotStatus
 from bot_config.validator import ConfigValidator, ValidationResult
-from helpers import make_row
+from .helpers import make_row
 
 
 class TestValidationResult:

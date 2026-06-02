@@ -20,8 +20,9 @@ class TelegramMode(str, Enum):
 
 
 class BrokerType(str, Enum):
-    PAPER = "paper"
-    BYBIT = "bybit"
+    PAPER          = "paper"
+    BYBIT          = "bybit"
+    BYBIT_TESTNET  = "bybit_testnet"
 
 
 # ── Секции ───────────────────────────────────────────────────────
@@ -80,7 +81,10 @@ class TelegramSettings(BaseSettings):
 
 
 class BrokerSettings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="BROKER_")
+    model_config = SettingsConfigDict(
+        env_prefix="BROKER_",
+        populate_by_name=True,   # разрешает обращение и по alias, и по имени поля
+    )
 
     # Поле названо broker_type, но читается из env BROKER_TYPE через alias.
     # alias="TYPE" + env_prefix="BROKER_" → env var BROKER_TYPE.
@@ -90,17 +94,21 @@ class BrokerSettings(BaseSettings):
         alias="TYPE",
     )
 
-    model_config = SettingsConfigDict(
-        env_prefix="BROKER_",
-        populate_by_name=True,   # разрешает обращение и по alias, и по имени поля
-    )
-
     request_timeout_sec:   float = 5.0
     retry_delay_sec:       float = 1.0
     max_retries:           int   = 3
     paper_initial_balance: float = 1000.0
     paper_commission_pct:  float = 0.1
     paper_slippage_pct:    float = 0.05
+
+    # ── Stop-Loss: жёсткий риск-лимит оператора ──────────────────
+    # Максимально допустимое проскальзывание при рыночном закрытии по SL.
+    # Static config (не JSONB) — WFO не должен иметь возможность поднять
+    # этот лимит без осознанного действия оператора.
+    # Проверяется в Close Protocol шаг 9 перед отправкой MARKET ордера.
+    # Превышение → STOP_CRANE (emit SL_CLOSE_BLOCKED).
+    # Env var: BROKER_SL_MAX_MARKET_SLIPPAGE_PCT
+    sl_max_market_slippage_pct: float = 1.0
 
     @field_validator("request_timeout_sec", "retry_delay_sec")
     @classmethod
@@ -114,6 +122,13 @@ class BrokerSettings(BaseSettings):
     def must_be_positive_int(cls, v: int) -> int:
         if v <= 0:
             raise ValueError("Значение должно быть больше 0")
+        return v
+
+    @field_validator("sl_max_market_slippage_pct")
+    @classmethod
+    def sl_slippage_must_be_positive(cls, v: float) -> float:
+        if v <= 0:
+            raise ValueError("sl_max_market_slippage_pct должен быть больше 0")
         return v
 
 

@@ -4,7 +4,7 @@ from decimal import Decimal
 import pytest
 
 from bot_config.models import BotConfig, BotStatus, CycleSnapshot
-from helpers import make_row
+from .helpers import make_row
 
 
 class TestBotStatus:

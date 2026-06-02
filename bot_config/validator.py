@@ -109,7 +109,9 @@ class ConfigValidator:
         self._check_balance(config, errors)
         self._check_status(config, errors)
         self._check_version(config, errors)
-        self._check_strategy_params(config, errors)
+        has_schema = self._check_strategy_params(config, errors)
+        if not has_schema:
+            self._check_sl_params(config, errors)
 
         if errors:
             for e in errors:
@@ -161,23 +163,96 @@ class ConfigValidator:
                 f"config_version must be >= 1, got {config.config_version}."
             )
 
-    def _check_strategy_params(self, config: BotConfig, errors: list[str]) -> None:
+    def _check_strategy_params(self, config: BotConfig, errors: list[str]) -> bool:
+        """
+        Validate strategy_params.
+
+        Returns True if a Pydantic schema was found and used for this strategy
+        (signals to the caller that SL params are already covered by the schema).
+        Returns False if only legacy callback validation (or no validation) ran.
+        """
         if not isinstance(config.strategy_params, dict):
             errors.append(
                 f"strategy_params must be a dict, got "
                 f"{type(config.strategy_params).__name__}."
             )
-            return  # no point running strategy-specific checks
+            return False
 
+        has_schema = False
+
+        # Layer 1: Pydantic schema validation (if registered for this strategy)
+        try:
+            from bot_config.strategy_schemas import (  # noqa: PLC0415
+                validate_strategy_params,
+                STRATEGY_SCHEMAS,
+            )
+            if config.strategy_name in STRATEGY_SCHEMAS:
+                schema_errors = validate_strategy_params(
+                    config.strategy_name, config.strategy_params
+                )
+                errors.extend(schema_errors)
+                has_schema = True
+        except ImportError:
+            pass  # schemas module not yet available
+
+        # Layer 2: legacy callback validators (run additionally if registered)
         strategy_validator = self._strategy_validators.get(config.strategy_name)
-        if strategy_validator is None:
-            # No registered validator for this strategy — pass through.
-            # Planned improvement: Pydantic schemas per strategy (Point 5 backlog).
+        if strategy_validator is not None:
+            callback_errors = strategy_validator(config.strategy_params)
+            errors.extend(callback_errors)
+        elif not has_schema:
             logger.debug(
                 "ConfigValidator: no strategy validator registered for %r, skipping.",
                 config.strategy_name,
             )
+
+        return has_schema
+
+    def _check_sl_params(self, config: BotConfig, errors: list[str]) -> None:
+        """
+        Проверить параметры Stop-Loss в strategy_params (ТЗ-7 StopLoss §13 шаг 2).
+
+        Правила:
+          - SL_ENABLED необязателен; дефолт False (SL выключен).
+          - Если SL_ENABLED=true — SL_PCT обязателен и должен быть > 0.
+          - Если SL_ENABLED=true и SL_PCT не задан — WARNING при горячей
+            перезагрузке, ошибка при первом запуске.
+
+        Проверка выполняется для всех стратегий — SL это риск-менеджмент,
+        не стратегическая логика.
+        """
+        if not isinstance(config.strategy_params, dict):
+            return  # уже поймано в _check_strategy_params
+
+        sl_enabled = config.strategy_params.get("SL_ENABLED", False)
+
+        if not sl_enabled:
+            return  # SL выключен — параметры не требуются
+
+        sl_pct = config.strategy_params.get("SL_PCT")
+
+        if sl_pct is None:
+            errors.append(
+                "SL_ENABLED=true но SL_PCT не задан в strategy_params. "
+                "Укажите SL_PCT > 0 или установите SL_ENABLED=false."
+            )
             return
 
-        strategy_errors = strategy_validator(config.strategy_params)
-        errors.extend(strategy_errors)
+        try:
+            sl_pct_float = float(sl_pct)
+        except (TypeError, ValueError):
+            errors.append(
+                f"SL_PCT должен быть числом > 0, получено: {sl_pct!r}."
+            )
+            return
+
+        if sl_pct_float <= 0:
+            errors.append(
+                f"SL_PCT должен быть > 0 при SL_ENABLED=true, получено: {sl_pct_float}."
+            )
+
+        if sl_pct_float >= 100:
+            errors.append(
+                f"SL_PCT={sl_pct_float} выглядит некорректно (>= 100%). "
+                f"Укажите значение в процентах, например 5.0 для 5%."
+            )

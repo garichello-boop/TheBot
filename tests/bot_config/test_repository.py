@@ -10,7 +10,7 @@ from bot_config.repository import (
     BotAlreadyRunningError, BotConfigInvalidError, _advisory_key,
 )
 from bot_config.validator import ConfigValidator
-from helpers import make_row
+from .helpers import make_row
 
 
 def _make_transaction_mock(row):
@@ -60,7 +60,7 @@ class TestAdvisoryKey:
 
 class TestConfigRepositoryLoad:
     def _make_repo(self):
-        return ConfigRepository(validator=ConfigValidator())
+        return ConfigRepository(db_pool=MagicMock(), validator=ConfigValidator())
 
     def test_load_returns_bot_config(self):
         transaction_mock, _ = _make_transaction_mock(make_row())
@@ -101,7 +101,7 @@ class TestConfigRepositoryLoad:
 
 class TestConfigRepositoryLoadFailures:
     def _make_repo(self):
-        return ConfigRepository(validator=ConfigValidator())
+        return ConfigRepository(db_pool=MagicMock(), validator=ConfigValidator())
 
     def test_raises_already_running_when_lock_not_acquired(self):
         lock_conn = _make_lock_conn_mock(acquired=False)
@@ -171,7 +171,7 @@ class TestConfigRepositoryLoadFailures:
 
 class TestConfigRepositoryReload:
     def _make_repo(self):
-        return ConfigRepository(validator=ConfigValidator())
+        return ConfigRepository(db_pool=MagicMock(), validator=ConfigValidator())
 
     def test_reload_returns_config_and_result(self):
         transaction_mock, _ = _make_transaction_mock(make_row())

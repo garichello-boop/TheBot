@@ -1,25 +1,13 @@
-import os
+"""
+tests/bot_state/conftest.py
+
+Unit-тест фикстуры для bot_state.
+Использует мок db_pool — реального PostgreSQL не требует.
+DB-слой мокается корневым tests/conftest.py (db, db.connection, psycopg2).
+"""
 import pytest
-from dotenv import load_dotenv
-
-
-def _get_dsn() -> str:
-    load_dotenv()
-    host = os.getenv("DB_HOST", "localhost")
-    port = os.getenv("DB_PORT", "5432")
-    name = os.getenv("DB_NAME", "thebot")
-    user = os.getenv("DB_USER", "postgres")
-    password = os.getenv("DB_PASSWORD", "")
-    return f"host={host} port={port} dbname={name} user={user} password={password}"
-
-
-@pytest.fixture(scope="session", autouse=True)
-def init_db_pool():
-    """Initialize DB pool once per test session."""
-    from db.connection import init_pool, close_pool
-    init_pool(dsn=_get_dsn(), min_conn=1, max_conn=5)
-    yield
-    close_pool()
+from decimal import Decimal
+from unittest.mock import MagicMock
 
 
 @pytest.fixture
@@ -33,43 +21,30 @@ def bot_id() -> str:
 
 
 @pytest.fixture
+def db_pool():
+    """Мок пула соединений. Репозитории принимают его в __init__."""
+    return MagicMock()
+
+
+@pytest.fixture
 def bot_state(user_id, bot_id):
-    from decimal import Decimal
     from bot_state.models import BotState
     return BotState.initial(user_id, bot_id, Decimal("1000.00"))
 
 
 @pytest.fixture
-def state_repo(user_id, bot_id):
+def state_repo(db_pool):
     from bot_state.state_repo import StateRepository
-    return StateRepository(user_id, bot_id)
+    return StateRepository(db_pool)
 
 
 @pytest.fixture
-def registry_repo(user_id, bot_id):
+def registry_repo(db_pool):
     from bot_state.registry_repo import RegistryRepository
-    return RegistryRepository(user_id, bot_id)
+    return RegistryRepository(db_pool)
 
 
 @pytest.fixture
-def state_manager(state_repo):
+def state_manager(db_pool):
     from bot_state.state_manager import StateManager
-    return StateManager(repo=state_repo, emitter=None)
-
-
-@pytest.fixture(autouse=True)
-def clean_bot_state(init_db_pool, user_id, bot_id):
-    """Delete test rows before each test. Runs automatically."""
-    from db.connection import get_connection
-    with get_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                "DELETE FROM bot_state WHERE user_id = %s AND bot_id = %s",
-                (user_id, bot_id),
-            )
-            cur.execute(
-                "DELETE FROM bot_registry WHERE user_id = %s AND bot_id = %s",
-                (user_id, bot_id),
-            )
-        conn.commit()
-    yield
+    return StateManager(db_pool, emitter=None)

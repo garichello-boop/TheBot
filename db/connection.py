@@ -57,6 +57,7 @@ def init_pool(dsn: str, min_conn: int = 1, max_conn: int = 5) -> None:
         maxconn=max_conn,
         dsn=dsn,
         cursor_factory=psycopg2.extras.RealDictCursor,  # rows as dicts, not tuples
+        options="-c timezone=UTC",  # все timestamps возвращаются в UTC
     )
     logger.info(
         "PostgreSQL connection pool initialized (min=%d, max=%d).",

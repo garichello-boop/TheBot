@@ -5,7 +5,7 @@ from decimal import Decimal
 from typing import Optional
 
 from db.connection import get_connection, transaction
-from bot_state.models import BotState, CycleStatus
+from bot_state.models import BotState, ClosingReason, CycleStatus
 
 
 class DuplicateBotError(Exception):
@@ -57,7 +57,8 @@ class StateRepository:
                 quote_spent, quote_received, last_applied_trade_id,
                 active_entry_order_id, active_tp_order_id,
                 active_dca_order_ids, pending_client_order_id,
-                entered_at, last_order_at, updated_at
+                entered_at, last_order_at, updated_at,
+                closing_reason
             FROM bot_state
             WHERE user_id = %s AND bot_id = %s
         """
@@ -105,7 +106,8 @@ class StateRepository:
                 quote_spent, quote_received, last_applied_trade_id,
                 active_entry_order_id, active_tp_order_id,
                 active_dca_order_ids, pending_client_order_id,
-                entered_at, last_order_at, updated_at
+                entered_at, last_order_at, updated_at,
+                closing_reason
             ) VALUES (
                 %s, %s, %s, %s, %s,
                 %s, %s,
@@ -113,7 +115,8 @@ class StateRepository:
                 %s, %s, %s,
                 %s, %s,
                 %s, %s,
-                %s, %s, %s
+                %s, %s, %s,
+                %s
             )
         """
         with transaction() as cur:
@@ -170,6 +173,19 @@ def _cs_value(cycle_status) -> str:
     return str(cycle_status)
 
 
+def _cr_value(closing_reason) -> Optional[str]:
+    """
+    Serialize closing_reason to DB string or None.
+
+    Handles ClosingReason enum, plain str, and None.
+    """
+    if closing_reason is None:
+        return None
+    if isinstance(closing_reason, ClosingReason):
+        return closing_reason.value
+    return str(closing_reason)
+
+
 def _build_update_sql() -> str:
     return """
         UPDATE bot_state SET
@@ -190,7 +206,8 @@ def _build_update_sql() -> str:
             pending_client_order_id = %s,
             entered_at              = %s,
             last_order_at           = %s,
-            updated_at              = %s
+            updated_at              = %s,
+            closing_reason          = %s
         WHERE user_id = %s
           AND bot_id  = %s
           AND version = %s
@@ -218,6 +235,7 @@ def _to_update_params(state: BotState) -> tuple:
         state.entered_at,
         state.last_order_at,
         now,
+        _cr_value(state.closing_reason),
         # WHERE clause
         state.user_id,
         state.bot_id,
@@ -249,4 +267,5 @@ def _to_params(state: BotState) -> tuple:
         state.entered_at,
         state.last_order_at,
         now,
+        _cr_value(state.closing_reason),
     )

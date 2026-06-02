@@ -3,7 +3,7 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import Optional, TYPE_CHECKING
 
-from bot_state.models import BotState, CycleStatus
+from bot_state.models import BotState, ClosingReason, CycleStatus
 from bot_state.state_fsm import StateFSM, InvalidTransitionError
 from bot_state.state_repo import StateRepository
 
@@ -46,6 +46,20 @@ class StateManager:
     transition_in_transaction() — same but inside caller-owned transaction.
     update()                    — field-only update, no FSM change.
     update_in_transaction()     — same inside caller-owned transaction.
+
+    closing_reason auto-reset
+    -------------------------
+    transition() автоматически сбрасывает closing_reason в None при переходе
+    в IDLE (если caller не передал closing_reason явно). Это гарантирует что
+    после финализации цикла поле всегда чистое — без ручных сбросов в
+    Close Protocol или bot_loop.
+
+    Явно установить closing_reason при переходе в CLOSING:
+        new_state = manager.transition(
+            state,
+            CycleStatus.CLOSING,
+            closing_reason=ClosingReason.SL,
+        )
     """
 
     def __init__(
@@ -137,7 +151,17 @@ class StateManager:
 
         with_updates() already increments version, so commit() skips
         the auto-bump step. FSM is validated inside commit().
+
+        Auto-reset closing_reason
+        -------------------------
+        При переходе в IDLE closing_reason автоматически сбрасывается в None,
+        если не передан явно. Это закрывает требование ТЗ-7 StopLoss §8:
+        "Добавить closing_reason в FSM-переход CLOSING → IDLE: сбросить в NULL."
         """
+        # Auto-reset closing_reason when cycle ends
+        if to_status == CycleStatus.IDLE and "closing_reason" not in updates:
+            updates["closing_reason"] = None
+
         new_state = state.with_updates(cycle_status=to_status, **updates)
         saved = self.commit(state, new_state)
         self._emit_transition(state.cycle_status, to_status, saved)
@@ -154,12 +178,18 @@ class StateManager:
         FSM transition inside an already-open transaction.
         Caller owns commit. Emit AFTER caller's commit via emit_post_commit().
 
+        Auto-reset closing_reason on IDLE — same rule as transition().
+
         Pattern:
             with transaction() as conn:
                 trade_repo.insert_in_transaction(conn, trade)
                 new_state = manager.transition_in_transaction(conn, state, NEW)
             manager.emit_post_commit(old_status, new_state)
         """
+        # Auto-reset closing_reason when cycle ends
+        if to_status == CycleStatus.IDLE and "closing_reason" not in updates:
+            updates["closing_reason"] = None
+
         self._fsm.transition(state.cycle_status, to_status)
         new_state = state.with_updates(cycle_status=to_status, **updates)
         self._check_invariants(new_state)
@@ -175,7 +205,7 @@ class StateManager:
         Persist field updates without changing cycle_status.
 
         Use for: avg_price after DCA, pending_client_order_id before send,
-        balance fields, dca_count, etc.
+        balance fields, dca_count, closing_reason, etc.
 
         Invariant checks still apply.
         Raises ValueError if cycle_status is in updates (use transition()).
@@ -322,10 +352,11 @@ class StateManager:
                 level="INFO",
                 message=f"FSM: {from_status} -> {to_status}",
                 payload={
-                    "from_status": str(from_status),
-                    "to_status":   str(to_status),
-                    "cycle_id":    state.cycle_id,
-                    "version":     state.version,
+                    "from_status":    str(from_status),
+                    "to_status":      str(to_status),
+                    "cycle_id":       state.cycle_id,
+                    "version":        state.version,
+                    "closing_reason": state.closing_reason.value if state.closing_reason else None,
                 },
             )
         except Exception:

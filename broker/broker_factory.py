@@ -5,6 +5,12 @@ BrokerFactory.create() читает BROKER_TYPE из AppSettings и возвра
 BrokerBundle — пару (broker, tracker). BotLoop работает с BrokerBundle,
 не зная о конкретных типах брокера.
 
+Поддерживаемые значения BROKER_TYPE:
+  paper          — PaperBroker (симуляция, без сети)
+  bybit          — BybitBroker, прод-биржа (BYBIT_API_KEY / BYBIT_API_SECRET)
+  bybit_testnet  — BybitBroker, тестовая среда Bybit
+                   (BYBIT_TESTNET_API_KEY / BYBIT_TESTNET_API_SECRET)
+
 Использование в точке входа бота:
 
     settings = AppSettings()
@@ -19,7 +25,7 @@ BrokerBundle — пару (broker, tracker). BotLoop работает с BrokerB
         trade_repo=trade_repo,
         bot_id="btc_mean_rev",
     )
-    bundle.start()   # запускает WS-трекер если Bybit
+    bundle.start()   # запускает WS-трекер если Bybit / Bybit Testnet
     try:
         bot_loop.run(bundle.broker, bundle.tracker)
     finally:
@@ -39,8 +45,11 @@ from broker.paper_broker import PaperBroker
 
 logger = logging.getLogger(__name__)
 
-_BROKER_PAPER = "paper"
-_BROKER_BYBIT = "bybit"
+_BROKER_PAPER          = "paper"
+_BROKER_BYBIT          = "bybit"
+_BROKER_BYBIT_TESTNET  = "bybit_testnet"
+
+_VALID_BROKER_TYPES = f"{_BROKER_PAPER}, {_BROKER_BYBIT}, {_BROKER_BYBIT_TESTNET}"
 
 
 @dataclass
@@ -54,7 +63,7 @@ class BrokerBundle:
 
     BotLoop в начале каждого тика:
 
-        if bundle.tracker:                              # LIVE режим
+        if bundle.tracker:                              # LIVE / TESTNET режим
             fills = bundle.tracker.pop_recent_fills()
         elif isinstance(bundle.broker, PaperBroker):   # PAPER режим
             fills = bundle.broker.process_market_tick(bid, ask)
@@ -66,7 +75,7 @@ class BrokerBundle:
         """
         Запустить подсистемы. Вызывается один раз при старте бота,
         до начала tick-loop.
-        Для Bybit: подключает BybitOrderTracker к приватному WS.
+        Для Bybit / Bybit Testnet: подключает BybitOrderTracker к приватному WS.
         Для Paper: ничего не делает (PaperBroker готов после __init__).
         """
         if self.tracker is not None:
@@ -77,7 +86,7 @@ class BrokerBundle:
     def stop(self) -> None:
         """
         Остановить подсистемы. Вызывается в finally-блоке BotLoop.
-        Для Bybit: закрывает WS-соединение трекера.
+        Для Bybit / Bybit Testnet: закрывает WS-соединение трекера.
         """
         if self.tracker is not None:
             self.tracker.stop()
@@ -100,6 +109,7 @@ class BrokerFactory:
         emitter,      # observability.emitter.EventEmitter
         trade_repo,   # observability.trade_repository.TradeRepository
         bot_id: str,
+        **kwargs,
     ) -> BrokerBundle:
         """
         Создать BrokerBundle по BROKER_TYPE из settings.broker.
@@ -113,7 +123,7 @@ class BrokerFactory:
 
         Raises:
             ValueError:  неизвестный BROKER_TYPE.
-            ImportError: pybit не установлен при BROKER_TYPE=bybit.
+            ImportError: pybit не установлен при BROKER_TYPE=bybit / bybit_testnet.
         """
         broker_type = settings.broker.broker_type.value.lower()
 
@@ -121,11 +131,18 @@ class BrokerFactory:
             return BrokerFactory._create_paper(settings, emitter, trade_repo, bot_id)
 
         if broker_type == _BROKER_BYBIT:
-            return BrokerFactory._create_bybit(settings, key_manager, emitter)
+            return BrokerFactory._create_bybit(
+                settings, key_manager, emitter, testnet=False
+            )
+
+        if broker_type == _BROKER_BYBIT_TESTNET:
+            return BrokerFactory._create_bybit(
+                settings, key_manager, emitter, testnet=True
+            )
 
         raise ValueError(
             f"BrokerFactory: неизвестный BROKER_TYPE='{broker_type}'. "
-            f"Допустимые значения: {_BROKER_PAPER}, {_BROKER_BYBIT}"
+            f"Допустимые значения: {_VALID_BROKER_TYPES}"
         )
 
     @staticmethod
@@ -134,8 +151,8 @@ class BrokerFactory:
 
         # PAPER_COMMISSION_PCT / PAPER_SLIPPAGE_PCT хранятся как проценты
         # (0.1 = 0.1%). PaperBroker ожидает десятичный множитель (0.001).
-        commission_pct = Decimal(str(bs.paper_commission_pct)) / Decimal("100")
-        slippage_pct = Decimal(str(bs.paper_slippage_pct)) / Decimal("100")
+        commission_pct  = Decimal(str(bs.paper_commission_pct)) / Decimal("100")
+        slippage_pct    = Decimal(str(bs.paper_slippage_pct))   / Decimal("100")
         initial_balance = Decimal(str(bs.paper_initial_balance))
 
         broker = PaperBroker(
@@ -157,14 +174,30 @@ class BrokerFactory:
         return BrokerBundle(broker=broker, tracker=None)
 
     @staticmethod
-    def _create_bybit(settings, key_manager, emitter) -> BrokerBundle:
+    def _create_bybit(
+        settings,
+        key_manager,
+        emitter,
+        testnet: bool,
+    ) -> BrokerBundle:
+        """
+        Создать BybitBroker + BybitOrderTracker.
+
+        testnet=False → прод-биржа, ключи BYBIT_API_KEY / BYBIT_API_SECRET.
+        testnet=True  → testnet.bybit.com, ключи BYBIT_TESTNET_API_KEY /
+                        BYBIT_TESTNET_API_SECRET.
+
+        Ключи для live и testnet разделены намеренно — исключает случайное
+        использование прод-ключей на тестовой среде и наоборот.
+        """
         bs = settings.broker
 
-        api_key = key_manager.get("BYBIT_API_KEY")
-        api_secret = key_manager.get("BYBIT_API_SECRET")
-
-        # bybit_testnet — необязательный параметр в BrokerSettings, дефолт False
-        testnet: bool = getattr(bs, "bybit_testnet", False)
+        if testnet:
+            api_key    = key_manager.get("BYBIT_TESTNET_API_KEY")
+            api_secret = key_manager.get("BYBIT_TESTNET_API_SECRET")
+        else:
+            api_key    = key_manager.get("BYBIT_API_KEY")
+            api_secret = key_manager.get("BYBIT_API_SECRET")
 
         tracker = BybitOrderTracker(
             api_key=api_key,
@@ -178,16 +211,16 @@ class BrokerFactory:
             api_secret=api_secret,
             emitter=emitter,
             testnet=testnet,
-            request_timeout_sec=float(bs.broker_request_timeout_sec),
-            retry_delay_sec=float(bs.broker_retry_delay_sec),
-            max_retries=int(bs.broker_max_retries),
+            request_timeout_sec=float(bs.request_timeout_sec),
+            retry_delay_sec=float(bs.retry_delay_sec),
+            max_retries=int(bs.max_retries),
         )
 
         logger.info(
             "BrokerFactory: BybitBroker | testnet=%s | "
             "timeout=%.1fs | max_retries=%d",
             testnet,
-            float(bs.broker_request_timeout_sec),
-            int(bs.broker_max_retries),
+            float(bs.request_timeout_sec),
+            int(bs.max_retries),
         )
         return BrokerBundle(broker=broker, tracker=tracker)

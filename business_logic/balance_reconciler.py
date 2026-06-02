@@ -37,11 +37,13 @@ class BalanceReconciler:
         check_interval_ticks: int = 10,
         balance_drift_pct: Decimal = Decimal("5"),
         quote_asset: str = "USDT",
+        paper_mode: bool = False,
     ) -> None:
         self._emitter              = emitter
         self._check_interval_ticks = check_interval_ticks
         self._balance_drift_pct    = balance_drift_pct
         self._quote_asset          = quote_asset
+        self._paper_mode           = paper_mode
 
     def maybe_check(self, ctx: "TickContext") -> None:
         """
@@ -54,6 +56,12 @@ class BalanceReconciler:
         self._check(ctx)
 
     def _check(self, ctx: "TickContext") -> None:
+        # В paper-режиме реальный Bybit-баланс несопоставим с виртуальным —
+        # сравнение бессмысленно и генерирует ложные алерты.
+        if self._paper_mode:
+            logger.debug("Balance reconciliation skipped (PAPER mode)")
+            return
+
         real_free = ctx.balance.free.get(self._quote_asset, Decimal(0))
         virtual_free = ctx.bot_state.virtual_balance_free
 

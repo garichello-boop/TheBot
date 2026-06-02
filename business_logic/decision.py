@@ -10,6 +10,10 @@ DecisionEngine — принятие решений на основе TickContext
 
 Последовательность принятия решения по FSM (ТЗ 7):
 
+  SL-проверка (до FSM):
+    → SL_ENABLED=true и bid <= avg_price*(1-SL_PCT/100) и IN_POSITION/WFL:
+      INITIATE_SL_CLOSE.
+
   IDLE:
     → CLOSE_ONLY/STOPPED/FORCE_CLOSE конфига: WAIT.
     → should_enter + цена не ушла за MAX_ENTRY_SLIPPAGE_PCT: ENTER.
@@ -84,15 +88,15 @@ class DecisionEngine:
         force_close_on_timeout: bool,
         dust_threshold: Decimal,
     ) -> None:
-        self._max_entry_slippage_pct       = max_entry_slippage_pct
-        self._partial_fill_threshold_pct   = partial_fill_threshold_pct
+        self._max_entry_slippage_pct         = max_entry_slippage_pct
+        self._partial_fill_threshold_pct     = partial_fill_threshold_pct
         self._tp_partial_close_threshold_pct = tp_partial_close_threshold_pct
-        self._entry_order_timeout_sec      = entry_order_timeout_sec
-        self._max_dca_count                = max_dca_count
-        self._dca_mode                     = dca_mode
-        self._max_position_days            = max_position_days
-        self._force_close_on_timeout       = force_close_on_timeout
-        self._dust_threshold               = dust_threshold
+        self._entry_order_timeout_sec        = entry_order_timeout_sec
+        self._max_dca_count                  = max_dca_count
+        self._dca_mode                       = dca_mode
+        self._max_position_days              = max_position_days
+        self._force_close_on_timeout         = force_close_on_timeout
+        self._dust_threshold                 = dust_threshold
 
     # ------------------------------------------------------------------
     # Публичный API
@@ -118,7 +122,18 @@ class DecisionEngine:
         Raises:
           TickSkippedError — если тик пропускается по бизнес-причине
                              (не инкрементирует счётчик ошибок).
+
+        SL-проверка выполняется ПЕРВОЙ — до FSM-диспатча.
+        Если SL срабатывает, StrategySignal игнорируется и возвращается
+        INITIATE_SL_CLOSE. Это соответствует ТЗ-7 StopLoss §6:
+        «SL-проверка встаёт между шагом 5 и шагом 6».
         """
+        # ── SL-проверка (до FSM-диспатча) ──────────────────────────────
+        sl_decision = self._check_stop_loss(ctx, state)
+        if sl_decision is not None:
+            return sl_decision
+
+        # ── FSM-диспатч ────────────────────────────────────────────────
         status = state.cycle_status
 
         if status == "IDLE":
@@ -142,6 +157,65 @@ class DecisionEngine:
                 action=DecisionAction.WAIT,
                 reason=f"unknown_cycle_status:{status}",
             )
+
+    # ------------------------------------------------------------------
+    # Stop-Loss
+    # ------------------------------------------------------------------
+
+    def _check_stop_loss(
+        self,
+        ctx: "TickContext",
+        state: "BotState",
+    ) -> "Decision | None":
+        """
+        Проверить условие стоп-лосса.
+
+        Читает SL_ENABLED и SL_PCT из strategy_params текущего снапшота.
+        Срабатывает только в IN_POSITION и WAITING_FOR_LIQUIDITY.
+        Сравнивает bid (цену продажи) с уровнем SL.
+
+        Returns:
+          Decision(INITIATE_SL_CLOSE) если SL сработал.
+          None если SL выключен, параметры невалидны или условие не выполнено.
+        """
+        params = ctx.bot_config.strategy_params
+
+        if not params.get("SL_ENABLED", False):
+            return None
+
+        sl_pct = params.get("SL_PCT")
+        if sl_pct is None or sl_pct <= 0:
+            return None
+
+        cycle_status = str(state.cycle_status)
+        if cycle_status not in ("IN_POSITION", "WAITING_FOR_LIQUIDITY"):
+            return None
+
+        avg_price = state.position_avg_price
+        if avg_price is None or avg_price <= 0:
+            # Некорректное состояние — молча пропускаем, не блокируем торговлю
+            return None
+
+        sl_price = avg_price * (1 - Decimal(str(sl_pct)) / 100)
+        current_bid = ctx.price_data.bid
+
+        if current_bid > sl_price:
+            return None
+
+        loss_pct = (avg_price - current_bid) / avg_price * 100
+
+        logger.warning(
+            "SL сработал: bid=%s <= sl_level=%s (avg=%s, sl_pct=%s, loss=%.2f%%)",
+            current_bid, sl_price, avg_price, sl_pct, float(loss_pct),
+        )
+
+        return Decision(
+            action=DecisionAction.INITIATE_SL_CLOSE,
+            reason=(
+                f"sl_triggered: bid={current_bid} <= sl_price={sl_price:.4f} "
+                f"(avg={avg_price}, sl_pct={sl_pct}, loss={loss_pct:.2f}%)"
+            ),
+        )
 
     # ------------------------------------------------------------------
     # IDLE
@@ -271,6 +345,17 @@ class DecisionEngine:
         state: "BotState",
         signal: StrategySignal,
     ) -> Decision:
+        # --- Нет активного TP — нужно выставить -------------------------
+        # Срабатывает при первом тике после входа в позицию (PLACE_TP
+        # пропускается в _decide_entering т.к. FSM уже IN_POSITION),
+        # а также при рестарте когда позиция есть но TP потерян.
+        if state.active_tp_order_id is None and not ctx.fills_for_tp:
+            return Decision(
+                action=DecisionAction.PLACE_TP,
+                reason="no_active_tp: выставляем TP для открытой позиции",
+                tp_price=signal.tp_price,
+            )
+
         # --- Проверяем события по TP -----------------------------------
         tp_fills = ctx.fills_for_tp
 
@@ -432,7 +517,7 @@ class DecisionEngine:
         ctx: "TickContext",
         state: "BotState",
         signal: StrategySignal,
-    ) -> Decision | None:
+    ) -> "Decision | None":
         """
         Проверить нужен ли DCA в LAZY-режиме.
 
@@ -489,7 +574,7 @@ class DecisionEngine:
         self,
         ctx: "TickContext",
         state: "BotState",
-    ) -> Decision | None:
+    ) -> "Decision | None":
         """Проверить не висит ли позиция дольше MAX_POSITION_DAYS."""
         if self._max_position_days is None or state.entered_at is None:
             return None
@@ -531,7 +616,7 @@ class DecisionEngine:
     def _find_nearest_dca_level(
         current_price: Decimal,
         levels: tuple[tuple[Decimal, Decimal], ...],
-    ) -> Decimal | None:
+    ) -> "Decimal | None":
         """Найти цену ближайшего пробитого DCA-уровня."""
         if not levels:
             return None

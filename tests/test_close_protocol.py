@@ -59,6 +59,7 @@ class FakeState:
     pending_client_order_id: Optional[str] = None
     bot_id: str = "bot1"
     user_id: str = "user1"
+    closing_reason: Optional[str] = None
 
     @property
     def has_position(self) -> bool:

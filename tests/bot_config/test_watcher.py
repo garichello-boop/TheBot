@@ -7,7 +7,7 @@ from bot_config.models import BotConfig, CycleSnapshot
 from bot_config.repository import BotConfigNotFoundError
 from bot_config.validator import ValidationResult
 from bot_config.watcher import ConfigWatcher, WatchResult
-from helpers import make_row
+from .helpers import make_row
 
 
 def _make_config(version: int = 1, **overrides) -> BotConfig:

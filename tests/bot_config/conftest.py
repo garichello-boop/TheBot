@@ -7,7 +7,7 @@ module-level import errors during pytest collection phase.
 """
 
 import pytest
-from helpers import make_row
+from .helpers import make_row
 
 
 @pytest.fixture
