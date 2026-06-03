@@ -242,11 +242,129 @@ class MeanReversionParams(BaseStrategyParams):
 
 
 # ---------------------------------------------------------------------------
+# MartingaleDCA
+# ---------------------------------------------------------------------------
+
+class MartingaleDCAParams(BaseStrategyParams):
+    """
+    Параметры стратегии Martingale/DCA.
+
+    Всегда входит при IDLE. При падении цены на DROP_TRIGGER_PCT% от
+    текущей средней — усредняется (DCA). При росте на PROFIT_TARGET_PCT%
+    от средней — закрывает позицию (TP).
+
+    Объём каждого следующего DCA-ордера умножается на DCA_MULTIPLIER.
+    DCA_MULTIPLIER=1.0 — плоская пирамида (равные объёмы на каждом уровне).
+    DCA_MULTIPLIER=1.5 — классическая мартингальная прогрессия.
+
+    Все поля имеют дефолты → пустой {} config валиден.
+    """
+
+    INVEST_AMOUNT: float = Field(
+        default=50.0,
+        gt=0,
+        description=(
+            "Размер базового ордера в USDT (например 50.0). "
+            "Объём entry-ордера = INVEST_AMOUNT / текущая_цена. "
+            "Не зависит от баланса — ответственность оператора."
+        ),
+    )
+    DROP_TRIGGER_PCT: float = Field(
+        default=3.0,
+        gt=0,
+        lt=50,
+        description=(
+            "Порог падения от текущей средней для DCA-усреднения, в процентах "
+            "(например 3.0 = 3%). Каждый следующий уровень рассчитывается "
+            "от avg предыдущего уровня."
+        ),
+    )
+    PROFIT_TARGET_PCT: float = Field(
+        default=5.0,
+        gt=0,
+        lt=100,
+        description=(
+            "Цель take-profit — рост от текущей средней, в процентах "
+            "(например 5.0 = 5%). TP = avg_price * (1 + PROFIT_TARGET_PCT / 100)."
+        ),
+    )
+    MAX_DCA_LEVELS: int = Field(
+        default=3,
+        ge=1,
+        le=10,
+        description=(
+            "Максимальное количество DCA-усреднений в одном цикле (не считая входа). "
+            "Итого позиций: 1 вход + MAX_DCA_LEVELS усреднений."
+        ),
+    )
+    DCA_MULTIPLIER: float = Field(
+        default=1.5,
+        ge=1.0,
+        le=5.0,
+        description=(
+            "Мультипликатор объёма каждого следующего DCA-ордера. "
+            "1.0 = все уровни одинакового размера (плоский DCA). "
+            "1.5 = объём каждого следующего уровня в 1.5 раза больше предыдущего."
+        ),
+    )
+
+    # ------------------------------------------------------------------
+    # Validators
+    # ------------------------------------------------------------------
+
+    @field_validator(
+        "INVEST_AMOUNT", "DROP_TRIGGER_PCT", "PROFIT_TARGET_PCT", "DCA_MULTIPLIER",
+        mode="before",
+    )
+    @classmethod
+    def coerce_float_fields(cls, v: Any) -> Any:
+        """Принять строковые значения из JSONB."""
+        if v is None:
+            return v
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return v
+
+    @field_validator("MAX_DCA_LEVELS", mode="before")
+    @classmethod
+    def coerce_int_fields(cls, v: Any) -> Any:
+        """Принять строковые значения из JSONB."""
+        if v is None:
+            return v
+        try:
+            return int(v)
+        except (TypeError, ValueError):
+            return v
+
+    @model_validator(mode="after")
+    def validate_dca_consistency(self) -> "MartingaleDCAParams":
+        """
+        Проверить что DROP_TRIGGER_PCT и PROFIT_TARGET_PCT образуют
+        рабочее соотношение риск/доходность.
+
+        Мягкое предупреждение: PROFIT_TARGET_PCT должен быть больше
+        DROP_TRIGGER_PCT (иначе TP может срабатывать раньше первого DCA).
+        Не является ошибкой — оператор может хотеть скальпинг.
+        """
+        if self.PROFIT_TARGET_PCT < self.DROP_TRIGGER_PCT:
+            logger.warning(
+                "MartingaleDCA: PROFIT_TARGET_PCT=%.1f < DROP_TRIGGER_PCT=%.1f. "
+                "TP может сработать до первого DCA-усреднения. "
+                "Это допустимо, но убедитесь что это намеренно.",
+                self.PROFIT_TARGET_PCT,
+                self.DROP_TRIGGER_PCT,
+            )
+        return self
+
+
+# ---------------------------------------------------------------------------
 # Реестр схем и публичная функция валидации
 # ---------------------------------------------------------------------------
 
 STRATEGY_SCHEMAS: dict[str, type[BaseStrategyParams]] = {
-    "MeanReversion": MeanReversionParams,
+    "MeanReversion":  MeanReversionParams,
+    "MartingaleDCA":  MartingaleDCAParams,
 }
 """
 Реестр схем по strategy_name.

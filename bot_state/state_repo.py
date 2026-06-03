@@ -22,7 +22,7 @@ class StateRepository:
     from the BotState object itself.
 
     Optimistic concurrency: save() checks WHERE version = state.version - 1.
-    rowcount == 0 в†’ RuntimeError (version conflict or missing row).
+    rowcount == 0 в†' RuntimeError (version conflict or missing row).
 
     get_connection() / transaction() use the globally configured pool
     (initialised by create_pool() in bot.py). self._pool is stored for

@@ -139,7 +139,9 @@ def _setup_console_handler(min_level: str) -> None:
         if isinstance(h, logging.StreamHandler) and h.stream is sys.stderr:
             return
 
-    handler = logging.StreamHandler(sys.stderr)
+    handler = logging.StreamHandler(
+        stream=open(sys.stderr.fileno(), mode='w', encoding='utf-8', buffering=1)
+    )
     handler.setLevel(getattr(logging, min_level.upper(), logging.WARNING))
     handler.setFormatter(
         logging.Formatter(

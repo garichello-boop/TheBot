@@ -1,35 +1,35 @@
 """
-broker/paper_broker.py вЂ” PaperBroker: Р±СѓРјР°Р¶РЅР°СЏ С‚РѕСЂРіРѕРІР»СЏ.
+broker/paper_broker.py — PaperBroker: бумажная торговля.
 
-РЎРёРјСѓР»РёСЂСѓРµС‚ СЂРµР°Р»СЊРЅСѓСЋ Р±РёСЂР¶Сѓ Р±РµР· СЂРµР°Р»СЊРЅС‹С… РґРµРЅРµРі. РЎРїРµС†РёР°Р»СЊРЅРѕ РЅР°СЃС‚СЂРѕРµРЅ
-РїРµСЃСЃРёРјРёСЃС‚РёС‡РЅРµРµ СЂРµР°Р»СЊРЅРѕСЃС‚Рё вЂ” С‡С‚РѕР±С‹ СЂРµР°Р»СЊРЅС‹Рµ СЂРµР·СѓР»СЊС‚Р°С‚С‹ Р±С‹Р»Рё РЅРµ С…СѓР¶Рµ Paper.
+Симулирует реальную биржу без реальных денег. Специально настроен
+пессимистичнее реальности — чтобы реальные результаты были не хуже Paper.
 
-Р¦РµРЅС‹ РёСЃРїРѕР»РЅРµРЅРёСЏ:
-    BUY  MARKET в†’ ask + slippage   (РїР»Р°С‚РёРј Р±РѕР»СЊС€Рµ СЂС‹РЅРѕС‡РЅРѕРіРѕ вЂ” РїРµСЃСЃРёРјРёСЃС‚РёС‡РЅРѕ)
-    SELL MARKET в†’ bid - slippage   (РїРѕР»СѓС‡Р°РµРј РјРµРЅСЊС€Рµ вЂ” РїРµСЃСЃРёРјРёСЃС‚РёС‡РЅРѕ)
-    BUY  LIMIT  в†’ limit_price      (pending РґРѕ РґРѕСЃС‚РёР¶РµРЅРёСЏ С†РµРЅС‹)
-    SELL LIMIT  в†’ limit_price      (pending РґРѕ РґРѕСЃС‚РёР¶РµРЅРёСЏ С†РµРЅС‹)
+Цены исполнения:
+    BUY  MARKET → ask + slippage   (платим больше рыночного — пессимистично)
+    SELL MARKET → bid - slippage   (получаем меньше — пессимистично)
+    BUY  LIMIT  → limit_price      (pending до достижения цены)
+    SELL LIMIT  → limit_price      (pending до достижения цены)
 
-Р–РёР·РЅРµРЅРЅС‹Р№ С†РёРєР» РѕСЂРґРµСЂР° РІ РґРІСѓС… С‚РёРєР°С…:
+Жизненный цикл ордера в двух тиках:
 
     РўРёРє N:
-        1. process_market_tick(bid, ask) в†’ РѕР±РЅРѕРІРёС‚СЊ С†РµРЅСѓ, Р·Р°РїРѕР»РЅРёС‚СЊ LIMIT
-        2. DecisionEngine СЂРµС€Р°РµС‚ BUY в†’ create_order(MARKET BUY)
-           в†’ PaperBroker: РёСЃРїРѕР»РЅРёС‚СЊ РЅРµРјРµРґР»РµРЅРЅРѕ, СЃРѕС…СЂР°РЅРёС‚СЊ fill РІРѕ РІРЅСѓС‚СЂРµРЅРЅРµР№ РѕС‡РµСЂРµРґРё
-           в†’ РІРµСЂРЅСѓС‚СЊ OrderCreated(PENDING)  # per IBroker РєРѕРЅС‚СЂР°РєС‚
-        3. commit + emit (Р±РµР· Р·РЅР°РЅРёСЏ Рѕ fill вЂ” РєР°Рє РЅР° СЂРµР°Р»СЊРЅРѕР№ Р±РёСЂР¶Рµ)
+        1. process_market_tick(bid, ask) → обновить цену, заполнить LIMIT
+        2. DecisionEngine решает BUY → create_order(MARKET BUY)
+           → PaperBroker: исполнить немедленно, сохранить fill во внутренней очереди
+           → вернуть OrderCreated(PENDING)  # per IBroker контракт
+        3. commit + emit (без знания о fill — как на реальной бирже)
 
     РўРёРє N+1:
-        1. get_pending_fills() в†’ РІРµСЂРЅСѓС‚СЊ РЅР°РєРѕРїР»РµРЅРЅС‹Рµ fills (РІРєР»СЋС‡Р°СЏ fill РёР· С‚РёРєР° N)
-        2. TickContext РІРёРґРёС‚ fill в†’ FSM РїРµСЂРµС…РѕРґ ENTERING в†’ IN_POSITION
+        1. get_pending_fills() → вернуть накопленные fills (включая fill из тика N)
+        2. TickContext видит fill → FSM переход ENTERING → IN_POSITION
 
-    Р­С‚Рѕ РїРѕРІРµРґРµРЅРёРµ РёРґРµРЅС‚РёС‡РЅРѕ СЂРµР°Р»СЊРЅРѕР№ Р±РёСЂР¶Рµ РіРґРµ WS-РїРѕРґС‚РІРµСЂР¶РґРµРЅРёРµ РїСЂРёС…РѕРґРёС‚
-    Р°СЃРёРЅС…СЂРѕРЅРЅРѕ РїРѕСЃР»Рµ РІС‹СЃС‚Р°РІР»РµРЅРёСЏ РѕСЂРґРµСЂР°. BotLoop РЅРµ С‚СЂРµР±СѓРµС‚ РёР·РјРµРЅРµРЅРёР№.
+    Это поведение идентично реальной бирже где WS-подтверждение приходит
+    асинхронно после выставления ордера. BotLoop не требует изменений.
 
-Р РµРіРёСЃС‚СЂР°С†РёСЏ СЂРѕР»РµР№ РѕСЂРґРµСЂРѕРІ:
-    OrderManager РІС‹Р·С‹РІР°РµС‚ register_order_role() РїРѕСЃР»Рµ create_order() С‡С‚РѕР±С‹
-    PaperBroker Р·РЅР°Р» С‚РёРї РѕСЂРґРµСЂР° (ENTRY/TP/DCA) РїСЂРё С„РѕСЂРјРёСЂРѕРІР°РЅРёРё FillEvent.
-    Р­С‚Рѕ РЅРµРѕР±С…РѕРґРёРјРѕ РґР»СЏ РєРѕСЂСЂРµРєС‚РЅРѕР№ С„РёР»СЊС‚СЂР°С†РёРё fills РІ TickContext.fills_for_entry/tp/dca.
+Регистрация ролей ордеров:
+    OrderManager вызывает register_order_role() после create_order() чтобы
+    PaperBroker знал тип ордера (ENTRY/TP/DCA) при формировании FillEvent.
+    Это необходимо для корректной фильтрации fills в TickContext.fills_for_entry/tp/dca.
 """
 from __future__ import annotations
 
@@ -60,18 +60,18 @@ from broker.models import (
     OrderType,
 )
 
-# Runtime import: business_logic.types РЅРµ РёРјРїРѕСЂС‚РёСЂСѓРµС‚ broker РІ СЂР°РЅС‚Р°Р№РјРµ
-# (С‚РѕР»СЊРєРѕ С‡РµСЂРµР· TYPE_CHECKING), РїРѕСЌС‚РѕРјСѓ С†РёРєР»РёС‡РµСЃРєРѕРіРѕ РёРјРїРѕСЂС‚Р° РЅРµС‚.
+# Runtime import: business_logic.types не импортирует broker в рантайме
+# (только через TYPE_CHECKING), поэтому циклического импорта нет.
 from business_logic.types import FillEvent
 from business_logic.types import OrderType as FillOrderType
 from business_logic.types import OrderStatus as FillOrderStatus
 
 logger = logging.getLogger(__name__)
 
-# (OrderRequest, locked_usdt) вЂ” locked_usdt > 0 С‚РѕР»СЊРєРѕ РґР»СЏ BUY LIMIT
+# (OrderRequest, locked_usdt) — locked_usdt > 0 только для BUY LIMIT
 _PendingEntry = Tuple[OrderRequest, Decimal]
 
-# Р РѕР»СЊ РѕСЂРґРµСЂР° РІ С‚РѕСЂРіРѕРІРѕРј С†РёРєР»Рµ вЂ” РјР°РїРїРёРЅРі РЅР° FillOrderType
+# Роль ордера в торговом цикле — маппинг на FillOrderType
 _ROLE_MAP: Dict[str, FillOrderType] = {
     "ENTRY": FillOrderType.ENTRY,
     "TP":    FillOrderType.TP,
@@ -81,10 +81,10 @@ _ROLE_MAP: Dict[str, FillOrderType] = {
 
 class PaperBroker(IBroker):
     """
-    Р‘СѓРјР°Р¶РЅС‹Р№ Р±СЂРѕРєРµСЂ. Р”РµС„РѕР»С‚РЅС‹Р№ СЂРµР¶РёРј РїСЂРё СЃС‚Р°СЂС‚Рµ Р±РѕС‚Р° (BROKER_TYPE=paper).
+    Бумажный брокер. Дефолтный режим при старте бота (BROKER_TYPE=paper).
 
-    РЎРѕР·РґР°С‘С‚СЃСЏ С‡РµСЂРµР· BrokerFactory. РџРѕСЃР»Рµ 2-4 РЅРµРґРµР»СЊ СѓСЃРїРµС€РЅРѕР№ Р±СѓРјР°Р¶РЅРѕР№
-    С‚РѕСЂРіРѕРІР»Рё РїРµСЂРµРєР»СЋС‡РёС‚СЊ РЅР° BybitBroker (BROKER_TYPE=bybit).
+    Создаётся через BrokerFactory. После 2-4 недель успешной бумажной
+    торговли переключить на BybitBroker (BROKER_TYPE=bybit).
     """
 
     def __init__(
@@ -102,47 +102,47 @@ class PaperBroker(IBroker):
         self._trade_repo = trade_repo
         self._bot_id = bot_id
 
-        # Р’РёСЂС‚СѓР°Р»СЊРЅС‹Р№ Р±Р°Р»Р°РЅСЃ РІ USDT
+        # Виртуальный баланс в USDT
         self._free_usdt: Decimal = initial_balance
         self._locked_usdt: Decimal = Decimal("0")
 
-        # Pending LIMIT РѕСЂРґРµСЂР°: exchange_order_id в†’ (request, locked_usdt)
+        # Pending LIMIT ордера: exchange_order_id → (request, locked_usdt)
         self._pending: Dict[str, _PendingEntry] = {}
 
-        # РћС‡РµСЂРµРґСЊ fills РѕР¶РёРґР°СЋС‰РёС… Р·Р°Р±РѕСЂР° С‡РµСЂРµР· get_pending_fills()
+        # Очередь fills ожидающих забора через get_pending_fills()
         self._fill_queue: List[OrderFill] = []
 
-        # Р РµРµСЃС‚СЂ СЂРѕР»РµР№: exchange_order_id в†’ "ENTRY" | "TP" | "DCA"
-        # Р—Р°РїРѕР»РЅСЏРµС‚СЃСЏ С‡РµСЂРµР· register_order_role() РѕС‚ OrderManager.
-        # РќРµРѕР±С…РѕРґРёРј РґР»СЏ РєРѕСЂСЂРµРєС‚РЅРѕРіРѕ FillEvent.order_type РїСЂРё get_pending_fills().
+        # Реестр ролей: exchange_order_id → "ENTRY" | "TP" | "DCA"
+        # Заполняется через register_order_role() от OrderManager.
+        # Необходим для корректного FillEvent.order_type при get_pending_fills().
         self._order_roles: Dict[str, str] = {}
 
-        # РўРµРєСѓС‰Р°СЏ С†РµРЅР° (РѕР±РЅРѕРІР»СЏРµС‚СЃСЏ С‡РµСЂРµР· process_market_tick РёР»Рё РїСЂРё MARKET orders)
+        # Текущая цена (обновляется через process_market_tick или при MARKET orders)
         self._last_bid: Optional[Decimal] = None
         self._last_ask: Optional[Decimal] = None
 
-        # РљСЌС€ market info (Р·Р°РґР°С‘С‚СЃСЏ С‡РµСЂРµР· set_market_info)
+        # Кэш market info (задаётся через set_market_info)
         self._market_info_cache: Dict[str, MarketInfo] = {}
 
         logger.info(
-            "PaperBroker Р·Р°РїСѓС‰РµРЅ | Р±Р°Р»Р°РЅСЃ=%.2f USDT | РєРѕРјРёСЃСЃРёСЏ=%.4f%% | slippage=%.4f%%",
+            "PaperBroker запущен | баланс=%.2f USDT | комиссия=%.4f%% | slippage=%.4f%%",
             initial_balance,
             float(commission_pct * 100),
             float(slippage_pct * 100),
         )
 
     # ------------------------------------------------------------------
-    # IBroker вЂ” РїСѓР±Р»РёС‡РЅС‹Р№ РёРЅС‚РµСЂС„РµР№СЃ
+    # IBroker — публичный интерфейс
     # ------------------------------------------------------------------
 
     def create_order(self, order: OrderRequest) -> OrderCreated:
         """
-        РЎРѕР·РґР°С‚СЊ РѕСЂРґРµСЂ.
+        Создать ордер.
 
-        MARKET в†’ РёСЃРїРѕР»РЅСЏРµС‚СЃСЏ РЅРµРјРµРґР»РµРЅРЅРѕ. Fill РїРѕРјРµС‰Р°РµС‚СЃСЏ РІ РѕС‡РµСЂРµРґСЊ
-                 Рё Р±СѓРґРµС‚ РІРѕР·РІСЂР°С‰С‘РЅ РЅР° СЃР»РµРґСѓСЋС‰РµРј get_pending_fills().
-        LIMIT  в†’ СЃРѕС…СЂР°РЅСЏРµС‚СЃСЏ РєР°Рє pending. РСЃРїРѕР»РЅРёС‚СЃСЏ РІ process_market_tick()
-                 РёР»Рё get_pending_fills() РєРѕРіРґР° С†РµРЅР° РґРѕСЃС‚РёРіРЅРµС‚ СѓСЂРѕРІРЅСЏ.
+        MARKET → исполняется немедленно. Fill помещается в очередь
+                 и будет возвращён на следующем get_pending_fills().
+        LIMIT  → сохраняется как pending. Исполнится в process_market_tick()
+                 или get_pending_fills() когда цена достигнет уровня.
         """
         if order.order_type == OrderType.MARKET:
             return self._fill_market_order(order)
@@ -150,7 +150,7 @@ class PaperBroker(IBroker):
 
     def cancel_order(self, order_id: str) -> bool:
         """
-        РћС‚РјРµРЅРёС‚СЊ РѕСЂРґРµСЂ. РРґРµРјРїРѕС‚РµРЅС‚РµРЅ вЂ” True РµСЃР»Рё РѕСЂРґРµСЂР° РЅРµС‚.
+        Отменить ордер. Идемпотентен — True если ордера нет.
         """
         if order_id not in self._pending:
             return True
@@ -161,26 +161,26 @@ class PaperBroker(IBroker):
             self._unlock_usdt(locked)
 
         logger.info(
-            "PaperBroker: РѕС‚РјРµРЅС‘РЅ %s %s (order_id=%s, СЂР°Р·Р±Р»РѕРєРёСЂРѕРІР°РЅРѕ=%.4f USDT)",
+            "PaperBroker: отменён %s %s (order_id=%s, разблокировано=%.4f USDT)",
             request.side.value, request.ticker, order_id, float(locked),
         )
         return True
 
     def get_order_status(self, order_id: str) -> OrderStatus:
-        """РЎС‚Р°С‚СѓСЃ РѕСЂРґРµСЂР°. РўРѕР»СЊРєРѕ РґР»СЏ reconciliation РЅР° СЃС‚Р°СЂС‚Рµ."""
+        """Статус ордера. Только для reconciliation на старте."""
         if order_id in self._pending:
             return OrderStatus.PENDING
         raise OrderNotFoundError(
-            f"PaperBroker: РѕСЂРґРµСЂ {order_id} РЅРµ РЅР°Р№РґРµРЅ. "
-            f"Р’РѕР·РјРѕР¶РЅРѕ СѓР¶Рµ РёСЃРїРѕР»РЅРµРЅ РёР»Рё РѕС‚РјРµРЅС‘РЅ."
+            f"PaperBroker: ордер {order_id} не найден. "
+            f"Возможно уже исполнен или отменён."
         )
 
     def get_balance(self) -> Balance:
         """
-        РўРµРєСѓС‰РёР№ РІРёСЂС‚СѓР°Р»СЊРЅС‹Р№ Р±Р°Р»Р°РЅСЃ Р±РѕС‚Р° РІ USDT.
+        Текущий виртуальный баланс бота в USDT.
 
-        Р’РѕР·РІСЂР°С‰Р°РµС‚ Balance СЃ dict-РїРѕР»СЏРјРё {asset: amount},
-        СЃРѕРІРјРµСЃС‚РёРјС‹Р№ СЃ BalanceReconciler.
+        Возвращает Balance с dict-полями {asset: amount},
+        совместимый с BalanceReconciler.
         """
         return Balance(
             free={"USDT": self._free_usdt},
@@ -188,13 +188,13 @@ class PaperBroker(IBroker):
         )
 
     def get_market_info(self, ticker: str) -> MarketInfo:
-        """РўРѕСЂРіРѕРІС‹Рµ РѕРіСЂР°РЅРёС‡РµРЅРёСЏ РёРЅСЃС‚СЂСѓРјРµРЅС‚Р°."""
+        """Торговые ограничения инструмента."""
         if ticker in self._market_info_cache:
             return self._market_info_cache[ticker]
 
         logger.warning(
-            "PaperBroker: MarketInfo РґР»СЏ %s РЅРµ Р·Р°РґР°РЅ вЂ” РёСЃРїРѕР»СЊР·СѓРµРј РґРµС„РѕР»С‚. "
-            "Р’С‹Р·РѕРІРёС‚Рµ set_market_info() РїСЂРё СЃС‚Р°СЂС‚Рµ РґР»СЏ С‚РѕС‡РЅРѕР№ СЃРёРјСѓР»СЏС†РёРё.",
+            "PaperBroker: MarketInfo для %s не задан — используем дефолт. "
+            "Вызовите set_market_info() при старте для точной симуляции.",
             ticker,
         )
         return MarketInfo(
@@ -207,7 +207,7 @@ class PaperBroker(IBroker):
         )
 
     def get_open_orders(self, ticker: Optional[str] = None) -> List[OpenOrder]:
-        """РЎРїРёСЃРѕРє Р°РєС‚РёРІРЅС‹С… (pending) РѕСЂРґРµСЂРѕРІ. Р”Р»СЏ reconciliation РЅР° СЃС‚Р°СЂС‚Рµ."""
+        """Список активных (pending) ордеров. Для reconciliation на старте."""
         result = []
         for order_id, (request, _locked) in self._pending.items():
             if ticker is not None and request.ticker != ticker:
@@ -228,33 +228,33 @@ class PaperBroker(IBroker):
 
     def get_pending_fills(self) -> List[FillEvent]:
         """
-        Р”СЂРµРЅРёСЂРѕРІР°С‚СЊ РІРЅСѓС‚СЂРµРЅРЅСЋСЋ РѕС‡РµСЂРµРґСЊ СЃРѕР±С‹С‚РёР№ РёСЃРїРѕР»РЅРµРЅРёСЏ.
+        Дренировать внутреннюю очередь событий исполнения.
 
-        Р’С‹Р·С‹РІР°РµС‚СЃСЏ РІ РЅР°С‡Р°Р»Рµ РєР°Р¶РґРѕРіРѕ С‚РёРєР° РёР· TickContext.collect().
+        Вызывается в начале каждого тика из TickContext.collect().
 
-        Р”РѕРїРѕР»РЅРёС‚РµР»СЊРЅРѕ: РїСЂРѕРІРµСЂСЏРµС‚ LIMIT РѕСЂРґРµСЂР° РїСЂРѕС‚РёРІ РїРѕСЃР»РµРґРЅРµР№ РёР·РІРµСЃС‚РЅРѕР№ С†РµРЅС‹
-        (_last_bid/_last_ask). Р­С‚Рѕ РїРѕР·РІРѕР»СЏРµС‚ TP Рё DCA РѕСЂРґРµСЂР°Рј СЃСЂР°Р±Р°С‚С‹РІР°С‚СЊ
-        РґР°Р¶Рµ Р±РµР· СЏРІРЅРѕРіРѕ РІС‹Р·РѕРІР° process_market_tick(), С…РѕС‚СЏ Рё СЃ Р·Р°РґРµСЂР¶РєРѕР№
-        РІ РѕРґРёРЅ С‚РёРє (С†РµРЅР° РѕР±РЅРѕРІР»СЏРµС‚СЃСЏ РїСЂРё РёСЃРїРѕР»РЅРµРЅРёРё MARKET РѕСЂРґРµСЂРѕРІ).
+        Дополнительно: проверяет LIMIT ордера против последней известной цены
+        (_last_bid/_last_ask). Это позволяет TP и DCA ордерам срабатывать
+        даже без явного вызова process_market_tick(), хотя и с задержкой
+        в один тик (цена обновляется при исполнении MARKET ордеров).
 
-        Р”Р»СЏ С‚РѕС‡РЅРѕР№ СЃРёРјСѓР»СЏС†РёРё: РІС‹Р·С‹РІР°С‚СЊ process_market_tick() СЏРІРЅРѕ
-        РґРѕ get_pending_fills() СЃ Р°РєС‚СѓР°Р»СЊРЅС‹РјРё С†РµРЅР°РјРё.
+        Для точной симуляции: вызывать process_market_tick() явно
+        до get_pending_fills() с актуальными ценами.
 
-        FillEvent.order_type Р·Р°РїРѕР»РЅСЏРµС‚СЃСЏ РёР· СЂРµРµСЃС‚СЂР° СЂРѕР»РµР№ (_order_roles).
-        Р•СЃР»Рё СЂРѕР»СЊ РЅРµ Р·Р°СЂРµРіРёСЃС‚СЂРёСЂРѕРІР°РЅР° вЂ” РґРµС„РѕР»С‚ ENTRY (СЃ WARNING).
+        FillEvent.order_type заполняется из реестра ролей (_order_roles).
+        Если роль не зарегистрирована — дефолт ENTRY (с WARNING).
         """
-        # РџСЂРѕРІРµСЂРёС‚СЊ LIMIT РѕСЂРґРµСЂР° РµСЃР»Рё РµСЃС‚СЊ Р°РєС‚СѓР°Р»СЊРЅС‹Рµ С†РµРЅС‹
+        # Проверить LIMIT ордера если есть актуальные цены
         if self._last_bid is not None and self._last_ask is not None:
             self._check_and_execute_limits(self._last_bid, self._last_ask)
 
-        # РљРѕРЅРІРµСЂС‚РёСЂРѕРІР°С‚СЊ OrderFill в†’ FillEvent Рё РІРµСЂРЅСѓС‚СЊ
+        # Конвертировать OrderFill → FillEvent и вернуть
         result = []
         for fill in self._fill_queue:
             role_str = self._order_roles.get(fill.exchange_order_id)
             if role_str is None:
                 logger.warning(
-                    "PaperBroker.get_pending_fills(): СЂРѕР»СЊ РѕСЂРґРµСЂР° %s РЅРµ Р·Р°СЂРµРіРёСЃС‚СЂРёСЂРѕРІР°РЅР° "
-                    "вЂ” РёСЃРїРѕР»СЊР·СѓРµРј ENTRY. Р’С‹Р·РѕРІРёС‚Рµ register_order_role() РїРѕСЃР»Рµ create_order().",
+                    "PaperBroker.get_pending_fills(): роль ордера %s не зарегистрирована "
+                    "— используем ENTRY. Вызовите register_order_role() после create_order().",
                     fill.exchange_order_id,
                 )
                 role_str = "ENTRY"
@@ -272,7 +272,7 @@ class PaperBroker(IBroker):
                 status=status,
                 order_type=order_type,
                 filled_qty=fill.filled_qty,
-                remaining_qty=Decimal("0"),   # PaperBroker РІСЃРµРіРґР° РїРѕР»РЅРѕРµ РёСЃРїРѕР»РЅРµРЅРёРµ
+                remaining_qty=Decimal("0"),   # PaperBroker всегда полное исполнение
                 avg_fill_price=fill.avg_price,
                 commission=fill.commission,
                 timestamp_ms=int(fill.timestamp * 1000),
@@ -287,11 +287,11 @@ class PaperBroker(IBroker):
         since_trade_id: Optional[str] = None,
     ) -> List[HistoricalFill]:
         """
-        РСЃС‚РѕСЂРёС‡РµСЃРєР°СЏ Р»РµРЅС‚Р° СЃРґРµР»РѕРє вЂ” С‚РѕР»СЊРєРѕ РґР»СЏ reconciliation.
+        Историческая лента сделок — только для reconciliation.
 
-        PaperBroker РЅРµ С…СЂР°РЅРёС‚ РёСЃС‚РѕСЂРёСЋ fills вЂ” РІРѕР·РІСЂР°С‰Р°РµС‚ РїСѓСЃС‚РѕР№ СЃРїРёСЃРѕРє.
-        РџРѕР»РЅР°СЏ СЂРµР°Р»РёР·Р°С†РёСЏ С‚СЂРµР±СѓРµС‚ С…СЂР°РЅРµРЅРёСЏ fills РІ TradeRepository
-        СЃ trade_id РґР»СЏ РёРЅРєСЂРµРјРµРЅС‚Р°Р»СЊРЅРѕРіРѕ РґРѕСЃС‚СѓРїР°.
+        PaperBroker не хранит историю fills — возвращает пустой список.
+        Полная реализация требует хранения fills в TradeRepository
+        с trade_id для инкрементального доступа.
         """
         return []
 
@@ -304,56 +304,56 @@ class PaperBroker(IBroker):
 
     def process_market_tick(self, bid: Decimal, ask: Decimal) -> List[OrderFill]:
         """
-        РћР±РЅРѕРІРёС‚СЊ С†РµРЅСѓ Рё РїСЂРѕРІРµСЂРёС‚СЊ LIMIT РѕСЂРґРµСЂР°. Р’РѕР·РІСЂР°С‰Р°РµС‚ СЃС‹СЂС‹Рµ OrderFill.
+        Обновить цену и проверить LIMIT ордера. Возвращает сырые OrderFill.
 
-        РћСЃС‚Р°РІР»РµРЅ РґР»СЏ РѕР±СЂР°С‚РЅРѕР№ СЃРѕРІРјРµСЃС‚РёРјРѕСЃС‚Рё Рё СЏРІРЅРѕРіРѕ РІС‹Р·РѕРІР° РёР· С‚РµСЃС‚РѕРІ.
-        Р’ РїСЂРѕРґР°РєС€РЅ tick-loop РёСЃРїРѕР»СЊР·СѓРµС‚СЃСЏ get_pending_fills() вЂ” РѕРЅ РІС‹Р·С‹РІР°РµС‚
-        _check_and_execute_limits() РІРЅСѓС‚СЂРё, РёСЃРїРѕР»СЊР·СѓСЏ СЃРѕС…СЂР°РЅС‘РЅРЅС‹Рµ С†РµРЅС‹.
+        Оставлен для обратной совместимости и явного вызова из тестов.
+        В продакшн tick-loop используется get_pending_fills() — он вызывает
+        _check_and_execute_limits() внутри, используя сохранённые цены.
         """
         self._last_bid = bid
         self._last_ask = ask
         self._check_and_execute_limits(bid, ask)
-        # Fills РЅР°РєР°РїР»РёРІР°СЋС‚СЃСЏ РІ _fill_queue РґР»СЏ get_pending_fills().
-        # process_market_tick() РЅРµ РґСЂРµРЅРёСЂСѓРµС‚ РѕС‡РµСЂРµРґСЊ вЂ” РґСЂРµРЅР°Р¶ С‚РѕР»СЊРєРѕ РІ get_pending_fills().
+        # Fills накапливаются в _fill_queue для get_pending_fills().
+        # process_market_tick() не дренирует очередь — дренаж только в get_pending_fills().
         return []
 
     def register_order_role(self, exchange_order_id: str, role: str) -> None:
         """
-        Р—Р°СЂРµРіРёСЃС‚СЂРёСЂРѕРІР°С‚СЊ Р±РёР·РЅРµСЃ-СЂРѕР»СЊ РѕСЂРґРµСЂР° (ENTRY / TP / DCA).
+        Зарегистрировать бизнес-роль ордера (ENTRY / TP / DCA).
 
-        РћР±СЏР·Р°С‚РµР»СЊРЅРѕ РІС‹Р·С‹РІР°С‚СЊ РёР· OrderManager РїРѕСЃР»Рµ create_order():
+        Обязательно вызывать из OrderManager после create_order():
             created = broker.create_order(request)
             broker.register_order_role(created.exchange_order_id, "TP")
 
-        Р‘РµР· СЌС‚РѕРіРѕ get_pending_fills() РЅРµ СЃРјРѕР¶РµС‚ РїСЂР°РІРёР»СЊРЅРѕ Р·Р°РїРѕР»РЅРёС‚СЊ
-        FillEvent.order_type, Рё TickContext.fills_for_tp/entry/dca РІРµСЂРЅСѓС‚
-        РїСѓСЃС‚С‹Рµ РєРѕСЂС‚РµР¶Рё вЂ” FSM РЅРµ Р±СѓРґРµС‚ РґРІРёРіР°С‚СЊСЃСЏ.
+        Без этого get_pending_fills() не сможет правильно заполнить
+        FillEvent.order_type, и TickContext.fills_for_tp/entry/dca вернут
+        пустые кортежи — FSM не будет двигаться.
 
         role: "ENTRY" | "TP" | "DCA"
         """
         if role not in _ROLE_MAP:
             logger.warning(
-                "PaperBroker.register_order_role: РЅРµРёР·РІРµСЃС‚РЅР°СЏ СЂРѕР»СЊ %r "
-                "(РѕР¶РёРґР°РµС‚СЃСЏ ENTRY/TP/DCA). order_id=%s",
+                "PaperBroker.register_order_role: неизвестная роль %r "
+                "(ожидается ENTRY/TP/DCA). order_id=%s",
                 role, exchange_order_id,
             )
         self._order_roles[exchange_order_id] = role
 
     def set_market_info(self, info: MarketInfo) -> None:
-        """Р—Р°РґР°С‚СЊ С‚РѕСЂРіРѕРІС‹Рµ РѕРіСЂР°РЅРёС‡РµРЅРёСЏ РёРЅСЃС‚СЂСѓРјРµРЅС‚Р°."""
+        """Задать торговые ограничения инструмента."""
         self._market_info_cache[info.ticker] = info
         logger.debug(
-            "PaperBroker: MarketInfo Р·Р°РґР°РЅ РґР»СЏ %s "
+            "PaperBroker: MarketInfo задан для %s "
             "(min_qty=%s, step_size=%s, min_notional=%s)",
             info.ticker, info.min_qty, info.step_size, info.min_notional,
         )
 
     # ------------------------------------------------------------------
-    # Р’РЅСѓС‚СЂРµРЅРЅРёРµ РјРµС‚РѕРґС‹
+    # Внутренние методы
     # ------------------------------------------------------------------
 
     def _check_and_execute_limits(self, bid: Decimal, ask: Decimal) -> None:
-        """РќР°Р№С‚Рё Рё РёСЃРїРѕР»РЅРёС‚СЊ СЃСЂР°Р±РѕС‚Р°РІС€РёРµ LIMIT РѕСЂРґРµСЂР°."""
+        """Найти и исполнить сработавшие LIMIT ордера."""
         triggered: List[Tuple[str, OrderRequest, Decimal, Decimal]] = []
         for order_id, (request, locked) in self._pending.items():
             fill_price = self._check_limit_trigger(request, bid, ask)
@@ -428,11 +428,11 @@ class PaperBroker(IBroker):
         )
 
     def _fill_market_order(self, order: OrderRequest) -> OrderCreated:
-        """РСЃРїРѕР»РЅРёС‚СЊ MARKET РѕСЂРґРµСЂ РЅРµРјРµРґР»РµРЅРЅРѕ РїРѕ ask/bid В± slippage."""
+        """Исполнить MARKET ордер немедленно по ask/bid ± slippage."""
         if self._last_ask is None or self._last_bid is None:
             raise BrokerError(
-                "PaperBroker: РЅРµС‚ С‚РµРєСѓС‰РµР№ С†РµРЅС‹ РґР»СЏ MARKET РѕСЂРґРµСЂР°. "
-                "process_market_tick() РёР»Рё register_order_role() РґРѕР»Р¶РЅС‹ Р±С‹С‚СЊ РІС‹Р·РІР°РЅС‹ СЃРЅР°С‡Р°Р»Р°."
+                "PaperBroker: нет текущей цены для MARKET ордера. "
+                "process_market_tick() или register_order_role() должны быть вызваны сначала."
             )
 
         execution_price = self._market_execution_price(order.side)
@@ -442,8 +442,8 @@ class PaperBroker(IBroker):
             total_cost = order.quantity * execution_price * (1 + self._commission_pct)
             if total_cost > self._free_usdt:
                 raise InsufficientFundsError(
-                    f"PaperBroker: РЅРµРґРѕСЃС‚Р°С‚РѕС‡РЅРѕ USDT РґР»СЏ BUY MARKET. "
-                    f"РќСѓР¶РЅРѕ {float(total_cost):.4f}, РґРѕСЃС‚СѓРїРЅРѕ {float(self._free_usdt):.4f}"
+                    f"PaperBroker: недостаточно USDT для BUY MARKET. "
+                    f"Нужно {float(total_cost):.4f}, доступно {float(self._free_usdt):.4f}"
                 )
 
         self._execute_fill(
@@ -461,10 +461,10 @@ class PaperBroker(IBroker):
         )
 
     def _place_limit_order(self, order: OrderRequest) -> OrderCreated:
-        """РџРѕСЃС‚Р°РІРёС‚СЊ LIMIT РѕСЂРґРµСЂ РІ pending."""
+        """Поставить LIMIT ордер в pending."""
         if order.price is None:
             raise BrokerRejected(
-                f"PaperBroker: LIMIT РѕСЂРґРµСЂ {order.client_order_id} Р±РµР· С†РµРЅС‹"
+                f"PaperBroker: LIMIT ордер {order.client_order_id} без цены"
             )
 
         order_id = f"paper_{uuid4().hex[:12]}"
@@ -474,8 +474,8 @@ class PaperBroker(IBroker):
             lock_amount = order.quantity * order.price * (1 + self._commission_pct)
             if lock_amount > self._free_usdt:
                 raise InsufficientFundsError(
-                    f"PaperBroker: РЅРµРґРѕСЃС‚Р°С‚РѕС‡РЅРѕ USDT РґР»СЏ BUY LIMIT. "
-                    f"РќСѓР¶РЅРѕ {float(lock_amount):.4f}, РґРѕСЃС‚СѓРїРЅРѕ {float(self._free_usdt):.4f}"
+                    f"PaperBroker: недостаточно USDT для BUY LIMIT. "
+                    f"Нужно {float(lock_amount):.4f}, доступно {float(self._free_usdt):.4f}"
                 )
             self._lock_usdt(lock_amount)
 
@@ -503,10 +503,10 @@ class PaperBroker(IBroker):
         ask: Decimal,
     ) -> Optional[Decimal]:
         """
-        РџСЂРѕРІРµСЂРёС‚СЊ РґРѕСЃС‚РёРіРЅСѓС‚ Р»Рё СѓСЂРѕРІРµРЅСЊ LIMIT РѕСЂРґРµСЂР°.
+        Проверить достигнут ли уровень LIMIT ордера.
 
-        BUY  LIMIT: РёСЃРїРѕР»РЅСЏРµС‚СЃСЏ РµСЃР»Рё ask <= limit_price
-        SELL LIMIT: РёСЃРїРѕР»РЅСЏРµС‚СЃСЏ РµСЃР»Рё bid >= limit_price
+        BUY  LIMIT: исполняется если ask <= limit_price
+        SELL LIMIT: исполняется если bid >= limit_price
         """
         if request.price is None:
             return None
@@ -526,8 +526,8 @@ class PaperBroker(IBroker):
         locked_to_release: Decimal,
     ) -> None:
         """
-        РџСЂРёРјРµРЅРёС‚СЊ РёСЃРїРѕР»РЅРµРЅРёРµ РѕСЂРґРµСЂР°: РѕР±РЅРѕРІРёС‚СЊ Р±Р°Р»Р°РЅСЃ, Р·Р°РїРёСЃР°С‚СЊ РІ Р‘Р”,
-        СЌРјРёС‚РёСЂРѕРІР°С‚СЊ ORDER_FILLED, РґРѕР±Р°РІРёС‚СЊ РІ РѕС‡РµСЂРµРґСЊ.
+        Применить исполнение ордера: обновить баланс, записать в БД,
+        эмитировать ORDER_FILLED, добавить в очередь.
         """
         commission = request.quantity * execution_price * self._commission_pct
         ts = time.time()
@@ -539,7 +539,7 @@ class PaperBroker(IBroker):
         if side_str == "BUY":
             total_cost = request.quantity * execution_price + commission
             self._free_usdt -= total_cost
-            # РћР±РЅРѕРІРёС‚СЊ РєСЌС€ С†РµРЅ РёР· С„Р°РєС‚РёС‡РµСЃРєРѕР№ С†РµРЅС‹ РёСЃРїРѕР»РЅРµРЅРёСЏ
+            # Обновить кэш цен из фактической цены исполнения
             self._last_ask = execution_price
         else:
             proceeds = request.quantity * execution_price - commission
@@ -564,7 +564,7 @@ class PaperBroker(IBroker):
                 self._trade_repo.save_fill(fill, bot_id=self._bot_id)
             except Exception as exc:
                 logger.error(
-                    "PaperBroker: РѕС€РёР±РєР° СЃРѕС…СЂР°РЅРµРЅРёСЏ fill РІ Р‘Р” (order_id=%s): %s",
+                    "PaperBroker: ошибка сохранения fill в БД (order_id=%s): %s",
                     order_id, exc,
                 )
 
@@ -592,14 +592,14 @@ class PaperBroker(IBroker):
 
         logger.info(
             "PaperBroker fill: %s %s qty=%s @ %s | РєРѕРјРёСЃСЃРёСЏ=%s | "
-            "Р±Р°Р»Р°РЅСЃ=%.4f free / %.4f locked",
+            "баланс=%.4f free / %.4f locked",
             side_str, request.ticker,
             request.quantity, execution_price, commission,
             float(self._free_usdt), float(self._locked_usdt),
         )
 
     def _market_execution_price(self, side: OrderSide) -> Decimal:
-        """Р¦РµРЅР° РёСЃРїРѕР»РЅРµРЅРёСЏ MARKET СЃ РїРµСЃСЃРёРјРёСЃС‚РёС‡РЅС‹Рј slippage."""
+        """Цена исполнения MARKET с пессимистичным slippage."""
         if side == OrderSide.BUY:
             return self._last_ask * (1 + self._slippage_pct)
         return self._last_bid * (1 - self._slippage_pct)

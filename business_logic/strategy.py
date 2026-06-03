@@ -177,6 +177,12 @@ def create_strategy(strategy_name: str) -> BaseStrategy:
     except ImportError:
         pass
 
+    try:
+        from strategies.martingale_dca import MartingaleDCAStrategy  # noqa: PLC0415
+        registry["MartingaleDCA"] = MartingaleDCAStrategy
+    except ImportError:
+        pass
+
     if strategy_name not in registry:
         available = ", ".join(registry.keys()) or "ни одна"
         raise ValueError(

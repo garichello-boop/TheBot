@@ -20,7 +20,7 @@ from .errors import (
     StopCraneError,
     TickSkippedError,
 )
-from .strategy import BaseStrategy, StrategySignal
+from .strategy import BaseStrategy, StrategySignal, create_strategy
 from .types import (
     CancelResult,
     Decision,
@@ -29,7 +29,6 @@ from .types import (
     OrderStatus,
     OrderType,
 )
-from strategies.mean_reversion import MeanReversionStrategy
 
 __all__ = [
     # Главный класс
@@ -55,23 +54,3 @@ __all__ = [
     "DecisionAction",
     "Decision",
 ]
-
-def create_strategy(strategy_name: str, params: dict = None):
-    """
-    Фабрика стратегий.
-    Связывает название из БД с реальным Python-классом.
-    """
-    if params is None:
-        params = {}
-
-    # Реестр доступных стратегий
-    strategies = {
-        "MeanReversion": MeanReversionStrategy,
-    }
-
-    if strategy_name not in strategies:
-        available = ", ".join(strategies.keys()) if strategies else "ни одна"
-        raise ValueError(f"Стратегия '{strategy_name}' не зарегистрирована. Доступные: {available}")
-
-    # Создаем экземпляр стратегии
-    return strategies[strategy_name](**params)

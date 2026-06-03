@@ -1,14 +1,14 @@
 """
-РџСѓРЅРєС‚ 2: РџСЂРѕРІР°Р№РґРµСЂ СЂС‹РЅРѕС‡РЅС‹С… РґР°РЅРЅС‹С… Bybit.
+Пункт 2: Провайдер рыночных данных Bybit.
 
-MVP: REST-only СЂРµР°Р»РёР·Р°С†РёСЏ.
-WebSocket Р±СѓРґРµС‚ РґРѕР±Р°РІР»РµРЅ РїРµСЂРµРґ РїРµСЂРµС…РѕРґРѕРј РЅР° Live-С‚РѕСЂРіРѕРІР»СЋ.
+MVP: REST-only реализация.
+WebSocket будет добавлен перед переходом на Live-торговлю.
 
-РўРµРєСѓС‰РёР№ СЂРµР¶РёРј: РїРѕСЃС‚РѕСЏРЅРЅС‹Р№ FALLBACK_REST.
-Р¤РѕРЅРѕРІС‹Р№ РїРѕС‚РѕРє РѕРїСЂР°С€РёРІР°РµС‚ Bybit V5 REST РєР°Р¶РґС‹Рµ poll_interval_sec.
-get_price() РІРѕР·РІСЂР°С‰Р°РµС‚ РїРѕСЃР»РµРґРЅРµРµ Р·Р°РєСЌС€РёСЂРѕРІР°РЅРЅРѕРµ Р·РЅР°С‡РµРЅРёРµ.
+Текущий режим: постоянный FALLBACK_REST.
+Фоновый поток опрашивает Bybit V5 REST каждые poll_interval_sec.
+get_price() возвращает последнее закэшированное значение.
 
-РџСѓР±Р»РёС‡РЅС‹Р№ Bybit V5 endpoint (Р±РµР· Р°СѓС‚РµРЅС‚РёС„РёРєР°С†РёРё):
+Публичный Bybit V5 endpoint (без аутентификации):
   GET https://api.bybit.com/v5/market/tickers?category=spot&symbol=BTCUSDT
 """
 
@@ -35,30 +35,30 @@ from market_data.watchdog import WatchdogTimer
 
 logger = logging.getLogger(__name__)
 
-# Bybit V5 РїСѓР±Р»РёС‡РЅС‹Р№ REST endpoint
+# Bybit V5 публичный REST endpoint
 _BYBIT_REST_BASE = "https://api.bybit.com"
 _TICKER_PATH     = "/v5/market/tickers"
 
-# РљР°С‚РµРіРѕСЂРёСЏ РёРЅСЃС‚СЂСѓРјРµРЅС‚Р°: spot / linear (USDT-РїРµСЂРї) / inverse
-# Р”Р»СЏ Р±СѓРјР°Р¶РЅРѕР№ С‚РѕСЂРіРѕРІР»Рё РёСЃРїРѕР»СЊР·СѓРµРј spot вЂ” РјРµРЅСЏРµС‚СЃСЏ С‡РµСЂРµР· РєРѕРЅС„РёРі РІ Р±СѓРґСѓС‰РµРј
+# Категория инструмента: spot / linear (USDT-перп) / inverse
+# Для бумажной торговли используем spot — меняется через конфиг в будущем
 _DEFAULT_CATEGORY = "spot"
 
 
 class BybitProvider(MarketDataProvider):
     """
-    РџСЂРѕРІР°Р№РґРµСЂ СЂС‹РЅРѕС‡РЅС‹С… РґР°РЅРЅС‹С… РґР»СЏ Bybit.
+    Провайдер рыночных данных для Bybit.
 
-    РџР°СЂР°РјРµС‚СЂС‹ (РёР· MarketSettings):
-        poll_interval_sec    вЂ” РёРЅС‚РµСЂРІР°Р» REST-РѕРїСЂРѕСЃР° (РґРµС„РѕР»С‚ 10 СЃРµРє).
-        stale_threshold_sec  вЂ” РїРѕСЂРѕРі СѓСЃС‚Р°СЂРµРІР°РЅРёСЏ РґР»СЏ WatchdogTimer (РґРµС„РѕР»С‚ 30 СЃРµРє).
-        reconnect_delay_sec  вЂ” РЅР°С‡Р°Р»СЊРЅР°СЏ Р·Р°РґРµСЂР¶РєР° СЂРµРєРѕРЅРЅРµРєС‚Р° WS (РґРµС„РѕР»С‚ 1 СЃРµРє).
-        max_reconnect_sec    вЂ” РјР°РєСЃРёРјР°Р»СЊРЅР°СЏ Р·Р°РґРµСЂР¶РєР° СЂРµРєРѕРЅРЅРµРєС‚Р° (РґРµС„РѕР»С‚ 30 СЃРµРє).
-        spike_threshold_pct  вЂ” РїРѕСЂРѕРі Р°РЅРѕРјР°Р»СЊРЅРѕРіРѕ СЃРєР°С‡РєР° РґР»СЏ PriceValidator (РґРµС„РѕР»С‚ 10%).
-        max_spread_pct       вЂ” РїРѕСЂРѕРі С€РёСЂРѕРєРѕРіРѕ СЃРїСЂРµРґР° (РґРµС„РѕР»С‚ 1%).
-        request_timeout_sec  вЂ” С‚Р°Р№РјР°СѓС‚ HTTP-Р·Р°РїСЂРѕСЃР° (РґРµС„РѕР»С‚ 5 СЃРµРє).
-        category             вЂ” РєР°С‚РµРіРѕСЂРёСЏ Bybit: spot / linear / inverse (РґРµС„РѕР»С‚ spot).
+    Параметры (из MarketSettings):
+        poll_interval_sec    — интервал REST-опроса (дефолт 10 сек).
+        stale_threshold_sec  — порог устаревания для WatchdogTimer (дефолт 30 сек).
+        reconnect_delay_sec  — начальная задержка реконнекта WS (дефолт 1 сек).
+        max_reconnect_sec    — максимальная задержка реконнекта (дефолт 30 сек).
+        spike_threshold_pct  — порог аномального скачка для PriceValidator (дефолт 10%).
+        max_spread_pct       — порог широкого спреда (дефолт 1%).
+        request_timeout_sec  — таймаут HTTP-запроса (дефолт 5 сек).
+        category             — категория Bybit: spot / linear / inverse (дефолт spot).
 
-    РСЃРїРѕР»СЊР·РѕРІР°РЅРёРµ:
+    Использование:
         provider = BybitProvider(
             poll_interval_sec=10,
             stale_threshold_sec=30,
@@ -68,8 +68,8 @@ class BybitProvider(MarketDataProvider):
         provider.subscribe("BTCUSDT")
 
         price = provider.get_price("BTCUSDT")
-        # price.ask вЂ” С†РµРЅР° РґР»СЏ РїРѕРєСѓРїРєРё
-        # price.bid вЂ” С†РµРЅР° РґР»СЏ РїСЂРѕРґР°Р¶Рё
+        # price.ask — цена для покупки
+        # price.bid — цена для продажи
 
         provider.stop()
     """
@@ -89,24 +89,24 @@ class BybitProvider(MarketDataProvider):
         self._request_timeout    = request_timeout_sec
         self._category           = category
 
-        # РљСЌС€ РїРѕСЃР»РµРґРЅРёС… С†РµРЅ: ticker в†’ PriceData
+        # Кэш последних цен: ticker → PriceData
         self._prices:     Dict[str, PriceData] = {}
         self._prices_lock = threading.Lock()
 
-        # РџРѕРґРїРёСЃР°РЅРЅС‹Рµ С‚РёРєРµСЂС‹
+        # Подписанные тикеры
         self._subscriptions:     set  = set()
         self._subscriptions_lock = threading.Lock()
 
-        # Р¤Р»Р°РіРё Р¶РёР·РЅРµРЅРЅРѕРіРѕ С†РёРєР»Р°
+        # Флаги жизненного цикла
         self._started  = False
-        self._status   = ProviderStatus.FALLBACK_REST  # MVP: РІСЃРµРіРґР° REST
+        self._status   = ProviderStatus.FALLBACK_REST  # MVP: всегда REST
         self._status_lock = threading.Lock()
 
-        # Р¤РѕРЅРѕРІС‹Р№ РїРѕС‚РѕРє REST-РѕРїСЂРѕСЃР°
+        # Фоновый поток REST-опроса
         self._stop_event  = threading.Event()
         self._poll_thread: Optional[threading.Thread] = None
 
-        # Р’Р°Р»РёРґР°С‚РѕСЂ С†РµРЅ
+        # Валидатор цен
         self._validator = PriceValidator(
             spike_threshold_pct=spike_threshold_pct,
             max_spread_pct=max_spread_pct,
@@ -114,7 +114,7 @@ class BybitProvider(MarketDataProvider):
             rest_fetcher=self._fetch_price_via_rest,
         )
 
-        # Watchdog: СЃР»РµРґРёС‚ Р·Р° СЃРІРµР¶РµСЃС‚СЊСЋ РґР°РЅРЅС‹С…
+        # Watchdog: следит за свежестью данных
         self._watchdog = WatchdogTimer(
             stale_threshold_sec=stale_threshold_sec,
             on_stale=self._on_stale,
@@ -122,8 +122,8 @@ class BybitProvider(MarketDataProvider):
             name=f"Watchdog-Bybit",
         )
 
-        # FallbackManager: СѓРїСЂР°РІР»СЏРµС‚ СЂРµРєРѕРЅРЅРµРєС‚РѕРј WS
-        # MVP: ws_teardown Рё ws_connect вЂ” Р·Р°РіР»СѓС€РєРё (WS РЅРµ СЂРµР°Р»РёР·РѕРІР°РЅ)
+        # FallbackManager: управляет реконнектом WS
+        # MVP: ws_teardown и ws_connect — заглушки (WS не реализован)
         self._fallback = FallbackManager(
             reconnect_delay_sec=reconnect_delay_sec,
             max_reconnect_sec=max_reconnect_sec,
@@ -137,33 +137,33 @@ class BybitProvider(MarketDataProvider):
     # ------------------------------------------------------------------
 
     def subscribe(self, ticker: str) -> None:
-        """РџРѕРґРїРёСЃР°С‚СЊСЃСЏ РЅР° С‚РёРєРµСЂ. РЎР»РµРґСѓСЋС‰РёР№ poll-С†РёРєР» РЅР°С‡РЅС‘С‚ РµРіРѕ РѕРїСЂР°С€РёРІР°С‚СЊ."""
+        """Подписаться на тикер. Следующий poll-цикл начнёт его опрашивать."""
         if not self._started:
-            raise ProviderNotStarted("Р’С‹Р·РѕРІРёС‚Рµ start() РїРµСЂРµРґ subscribe().")
+            raise ProviderNotStarted("Вызовите start() перед subscribe().")
         with self._subscriptions_lock:
             self._subscriptions.add(ticker.upper())
         logger.info("BybitProvider: РїРѕРґРїРёСЃРєР° РЅР° %s.", ticker)
 
     def unsubscribe(self, ticker: str) -> None:
-        """РћС‚РїРёСЃР°С‚СЊСЃСЏ РѕС‚ С‚РёРєРµСЂР° Рё СѓРґР°Р»РёС‚СЊ РєСЌС€РёСЂРѕРІР°РЅРЅСѓСЋ С†РµРЅСѓ."""
+        """Отписаться от тикера и удалить кэшированную цену."""
         ticker = ticker.upper()
         with self._subscriptions_lock:
             self._subscriptions.discard(ticker)
         with self._prices_lock:
             self._prices.pop(ticker, None)
-        logger.info("BybitProvider: РѕС‚РїРёСЃРєР° РѕС‚ %s.", ticker)
+        logger.info("BybitProvider: отписка от %s.", ticker)
 
     def get_price(self, ticker: str) -> PriceData:
         """
-        Р’РµСЂРЅСѓС‚СЊ РїРѕСЃР»РµРґРЅСЋСЋ Р·Р°РєСЌС€РёСЂРѕРІР°РЅРЅСѓСЋ С†РµРЅСѓ.
+        Вернуть последнюю закэшированную цену.
 
         Raises:
-            ProviderNotStarted:    start() РЅРµ РІС‹Р·С‹РІР°Р»СЃСЏ.
-            TickerNotSubscribed:   С‚РёРєРµСЂ РЅРµ РїРѕРґРїРёСЃР°РЅ.
-            MarketDataUnavailable: РґР°РЅРЅС‹С… РЅРµС‚ (РµС‰С‘ РЅРµ РїРѕР»СѓС‡РµРЅС‹ РёР»Рё РїСЂРѕРІР°Р№РґРµСЂ РІ FAILED).
+            ProviderNotStarted:    start() не вызывался.
+            TickerNotSubscribed:   тикер не подписан.
+            MarketDataUnavailable: данных нет (ещё не получены или провайдер в FAILED).
         """
         if not self._started:
-            raise ProviderNotStarted("Р’С‹Р·РѕРІРёС‚Рµ start() РїРµСЂРµРґ get_price().")
+            raise ProviderNotStarted("Вызовите start() перед get_price().")
 
         ticker = ticker.upper()
         with self._subscriptions_lock:
@@ -177,7 +177,7 @@ class BybitProvider(MarketDataProvider):
             raise MarketDataUnavailable(
                 ticker=ticker,
                 status=self.get_status(),
-                reason="Р”Р°РЅРЅС‹Рµ РµС‰С‘ РЅРµ РїРѕР»СѓС‡РµРЅС‹ вЂ” РґРѕР¶РґРёС‚РµСЃСЊ РїРµСЂРІРѕРіРѕ poll-С†РёРєР»Р°.",
+                reason="Данные ещё не получены — дождитесь первого poll-цикла.",
             )
 
         status = self.get_status()
@@ -185,7 +185,7 @@ class BybitProvider(MarketDataProvider):
             raise MarketDataUnavailable(
                 ticker=ticker,
                 status=status,
-                reason="РџСЂРѕРІР°Р№РґРµСЂ РІ СЃС‚Р°С‚СѓСЃРµ FAILED.",
+                reason="Провайдер в статусе FAILED.",
             )
 
         return price
@@ -195,9 +195,9 @@ class BybitProvider(MarketDataProvider):
             return self._status
 
     def start(self) -> None:
-        """Р—Р°РїСѓСЃС‚РёС‚СЊ РїСЂРѕРІР°Р№РґРµСЂ: Watchdog + С„РѕРЅРѕРІС‹Р№ REST-РѕРїСЂРѕСЃ."""
+        """Запустить провайдер: Watchdog + фоновый REST-опрос."""
         if self._started:
-            logger.debug("BybitProvider: СѓР¶Рµ Р·Р°РїСѓС‰РµРЅ, РїСЂРѕРїСѓСЃРєР°РµРј.")
+            logger.debug("BybitProvider: уже запущен, пропускаем.")
             return
 
         self._started = True
@@ -214,12 +214,12 @@ class BybitProvider(MarketDataProvider):
         self._poll_thread.start()
 
         logger.info(
-            "BybitProvider: Р·Р°РїСѓС‰РµРЅ (REST, poll_interval=%ds).",
+            "BybitProvider: запущен (REST, poll_interval=%ds).",
             self._poll_interval_sec,
         )
 
     def stop(self) -> None:
-        """РљРѕСЂСЂРµРєС‚РЅРѕ РѕСЃС‚Р°РЅРѕРІРёС‚СЊ РїСЂРѕРІР°Р№РґРµСЂ."""
+        """Корректно остановить провайдер."""
         if not self._started:
             return
 
@@ -233,7 +233,7 @@ class BybitProvider(MarketDataProvider):
             self._poll_thread.join(timeout=self._request_timeout + 2.0)
             self._poll_thread = None
 
-        logger.info("BybitProvider: РѕСЃС‚Р°РЅРѕРІР»РµРЅ.")
+        logger.info("BybitProvider: остановлен.")
 
     def is_healthy(self) -> bool:
         return self.get_status() in (
@@ -242,7 +242,7 @@ class BybitProvider(MarketDataProvider):
         )
 
     # ------------------------------------------------------------------
-    # REST polling loop (С„РѕРЅРѕРІС‹Р№ РїРѕС‚РѕРє)
+    # REST polling loop (фоновый поток)
     # ------------------------------------------------------------------
 
     # ------------------------------------------------------------------
@@ -324,8 +324,8 @@ class BybitProvider(MarketDataProvider):
 
 
     def _poll_loop(self) -> None:
-        """РћРїСЂР°С€РёРІР°РµС‚ REST РєР°Р¶РґС‹Рµ poll_interval_sec РґР»СЏ РІСЃРµС… РїРѕРґРїРёСЃР°РЅРЅС‹С… С‚РёРєРµСЂРѕРІ."""
-        logger.debug("BybitProvider: poll-С†РёРєР» Р·Р°РїСѓС‰РµРЅ.")
+        """Опрашивает REST каждые poll_interval_sec для всех подписанных тикеров."""
+        logger.debug("BybitProvider: poll-цикл запущен.")
 
         while not self._stop_event.is_set():
             with self._subscriptions_lock:
@@ -338,19 +338,19 @@ class BybitProvider(MarketDataProvider):
 
             self._stop_event.wait(timeout=self._poll_interval_sec)
 
-        logger.debug("BybitProvider: poll-С†РёРєР» Р·Р°РІРµСЂС€С‘РЅ.")
+        logger.debug("BybitProvider: poll-цикл завершён.")
 
     def _poll_ticker(self, ticker: str) -> None:
-        """РћРґРёРЅ REST-Р·Р°РїСЂРѕСЃ РїРѕ С‚РёРєРµСЂСѓ + РІР°Р»РёРґР°С†РёСЏ + РєСЌС€РёСЂРѕРІР°РЅРёРµ."""
+        """Один REST-запрос по тикеру + валидация + кэширование."""
         try:
             new_price = self._fetch_price_via_rest(ticker)
         except Exception as exc:
-            logger.error("BybitProvider: REST-Р·Р°РїСЂРѕСЃ РґР»СЏ %s Р·Р°РІРµСЂС€РёР»СЃСЏ РѕС€РёР±РєРѕР№: %s", ticker, exc)
+            logger.error("BybitProvider: REST-запрос для %s завершился ошибкой: %s", ticker, exc)
             self._set_status(ProviderStatus.STALE)
             return
 
         if new_price is None:
-            logger.warning("BybitProvider: REST РІРµСЂРЅСѓР» None РґР»СЏ %s.", ticker)
+            logger.warning("BybitProvider: REST вернул None для %s.", ticker)
             return
 
         with self._prices_lock:
@@ -364,7 +364,7 @@ class BybitProvider(MarketDataProvider):
 
         if not result.accepted:
             logger.warning(
-                "BybitProvider: С†РµРЅР° %s РѕС‚РєР»РѕРЅРµРЅР° РІР°Р»РёРґР°С‚РѕСЂРѕРј: %s",
+                "BybitProvider: цена %s отклонена валидатором: %s",
                 ticker, result.reason,
             )
             return
@@ -372,18 +372,18 @@ class BybitProvider(MarketDataProvider):
         with self._prices_lock:
             self._prices[ticker] = new_price
 
-        # РћР±РЅРѕРІРёС‚СЊ Watchdog вЂ” РґР°РЅРЅС‹Рµ СЃРІРµР¶РёРµ
+        # Обновить Watchdog — данные свежие
         self._watchdog.update()
 
         if result.wide_spread:
             logger.warning(
-                "BybitProvider: С€РёСЂРѕРєРёР№ СЃРїСЂРµРґ РґР»СЏ %s (%.4f%%).",
+                "BybitProvider: широкий спред для %s (%.4f%%).",
                 ticker, float(new_price.spread_pct),
             )
 
         if result.spike_detected:
             logger.warning(
-                "BybitProvider: СЃРєР°С‡РѕРє %.2f%% РґР»СЏ %s (outcome=%s).",
+                "BybitProvider: скачок %.2f%% для %s (outcome=%s).",
                 result.spike_pct, ticker, result.outcome.value,
             )
 
@@ -393,15 +393,15 @@ class BybitProvider(MarketDataProvider):
         )
 
     # ------------------------------------------------------------------
-    # REST fetch (РёСЃРїРѕР»СЊР·СѓРµС‚СЃСЏ Рё poll-С†РёРєР»РѕРј, Рё PriceValidator)
+    # REST fetch (используется и poll-циклом, и PriceValidator)
     # ------------------------------------------------------------------
 
     def _fetch_price_via_rest(self, ticker: str) -> Optional[PriceData]:
         """
-        Р—Р°РїСЂРѕСЃРёС‚СЊ С†РµРЅСѓ С‚РёРєРµСЂР° С‡РµСЂРµР· Bybit V5 REST API.
+        Запросить цену тикера через Bybit V5 REST API.
 
-        Р’РѕР·РІСЂР°С‰Р°РµС‚ PriceData РёР»Рё None РїСЂРё РѕС€РёР±РєРµ.
-        Р‘СЂРѕСЃР°РµС‚ requests.RequestException РїСЂРё СЃРµС‚РµРІРѕР№ РїСЂРѕР±Р»РµРјРµ.
+        Возвращает PriceData или None при ошибке.
+        Бросает requests.RequestException при сетевой проблеме.
         """
         url    = f"{_BYBIT_REST_BASE}{_TICKER_PATH}"
         params = {"category": self._category, "symbol": ticker.upper()}
@@ -414,14 +414,14 @@ class BybitProvider(MarketDataProvider):
         ret_code = data.get("retCode", -1)
         if ret_code != 0:
             logger.warning(
-                "BybitProvider: REST РІРµСЂРЅСѓР» retCode=%d, msg=%s",
+                "BybitProvider: REST вернул retCode=%d, msg=%s",
                 ret_code, data.get("retMsg", ""),
             )
             return None
 
         items = data.get("result", {}).get("list", [])
         if not items:
-            logger.warning("BybitProvider: РїСѓСЃС‚РѕР№ СЃРїРёСЃРѕРє С‚РёРєРµСЂРѕРІ РґР»СЏ %s.", ticker)
+            logger.warning("BybitProvider: пустой список тикеров для %s.", ticker)
             return None
 
         item = items[0]
@@ -432,7 +432,7 @@ class BybitProvider(MarketDataProvider):
 
         if bid <= 0 or ask <= 0 or last <= 0:
             logger.warning(
-                "BybitProvider: РЅРµРєРѕСЂСЂРµРєС‚РЅС‹Рµ С†РµРЅС‹ РґР»СЏ %s: bid=%s ask=%s last=%s",
+                "BybitProvider: некорректные цены для %s: bid=%s ask=%s last=%s",
                 ticker, bid, ask, last,
             )
             return None
@@ -446,10 +446,10 @@ class BybitProvider(MarketDataProvider):
             source=PriceSource.REST,
         )
 
-        # РџСЂРѕРІРµСЂСЏРµРј СЃРїСЂРµРґ (wide_spread РЅСѓР¶РµРЅ СѓР¶Рµ Р·РґРµСЃСЊ вЂ” РІ TickContext)
+        # Проверяем спред (wide_spread нужен уже здесь — в TickContext)
         spread_wide = float(price.spread_pct) > self._validator._max_spread_pct
         if spread_wide:
-            # РџРµСЂРµСЃРѕР·РґР°С‘Рј СЃ С„Р»Р°РіРѕРј (frozen dataclass)
+            # Пересоздаём с флагом (frozen dataclass)
             price = PriceData(
                 ticker=price.ticker,
                 bid=price.bid,
@@ -463,49 +463,49 @@ class BybitProvider(MarketDataProvider):
         return price
 
     # ------------------------------------------------------------------
-    # WS Р·Р°РіР»СѓС€РєРё (TODO: СЂРµР°Р»РёР·РѕРІР°С‚СЊ РїРµСЂРµРґ Live)
+    # WS заглушки (TODO: реализовать перед Live)
     # ------------------------------------------------------------------
 
     def _ws_connect_stub(self) -> None:
         """
-        TODO: СЂРµР°Р»РёР·РѕРІР°С‚СЊ WebSocket-РїРѕРґРєР»СЋС‡РµРЅРёРµ РїРµСЂРµРґ РїРµСЂРµС…РѕРґРѕРј РЅР° Live.
+        TODO: реализовать WebSocket-подключение перед переходом на Live.
 
-        Р”РѕР»Р¶РЅРѕ:
-          1. РћС‚РєСЂС‹С‚СЊ WS-СЃРѕРµРґРёРЅРµРЅРёРµ Рє Bybit (wss://stream.bybit.com/v5/public/spot).
-          2. РџРѕРґРїРёСЃР°С‚СЊСЃСЏ РЅР° С‚РёРєРµСЂС‹ РёР· self._subscriptions.
-          3. Р—Р°РїСѓСЃС‚РёС‚СЊ РѕР±СЂР°Р±РѕС‚С‡РёРє СЃРѕРѕР±С‰РµРЅРёР№ (РІС‹Р·С‹РІР°С‚СЊ _on_ws_message РЅР° РєР°Р¶РґС‹Р№ С‚РёРє).
-          4. РџСЂРё СѓСЃРїРµС…Рµ вЂ” self._set_status(ProviderStatus.CONNECTED).
+        Должно:
+          1. Открыть WS-соединение к Bybit (wss://stream.bybit.com/v5/public/spot).
+          2. Подписаться на тикеры из self._subscriptions.
+          3. Запустить обработчик сообщений (вызывать _on_ws_message на каждый тик).
+          4. При успехе — self._set_status(ProviderStatus.CONNECTED).
 
-        РџСЂРёРјРµСЂ РїРѕРґРїРёСЃРєРё Bybit WS:
+        Пример подписки Bybit WS:
           {"op": "subscribe", "args": ["tickers.BTCUSDT"]}
         """
         raise NotImplementedError(
-            "WebSocket РЅРµ СЂРµР°Р»РёР·РѕРІР°РЅ РІ MVP. "
-            "РџСЂРѕРІР°Р№РґРµСЂ СЂР°Р±РѕС‚Р°РµС‚ РІ СЂРµР¶РёРјРµ REST (FALLBACK_REST). "
-            "Р РµР°Р»РёР·СѓР№С‚Рµ _ws_connect_stub() РїРµСЂРµРґ РїРµСЂРµС…РѕРґРѕРј РЅР° Live."
+            "WebSocket не реализован в MVP. "
+            "Провайдер работает в режиме REST (FALLBACK_REST). "
+            "Реализуйте _ws_connect_stub() перед переходом на Live."
         )
 
     def _ws_teardown_stub(self) -> None:
         """
-        TODO: СЂРµР°Р»РёР·РѕРІР°С‚СЊ teardown WS-СЃРѕРµРґРёРЅРµРЅРёСЏ РїРµСЂРµРґ Live.
+        TODO: реализовать teardown WS-соединения перед Live.
 
-        Р”РѕР»Р¶РЅРѕ РєРѕСЂСЂРµРєС‚РЅРѕ Р·Р°РєСЂС‹С‚СЊ WS-СЃРѕРµРґРёРЅРµРЅРёРµ, РѕСЃС‚Р°РЅРѕРІРёС‚СЊ РѕР±СЂР°Р±РѕС‚С‡РёРє СЃРѕРѕР±С‰РµРЅРёР№
-        Рё РѕСЃРІРѕР±РѕРґРёС‚СЊ С„Р°Р№Р»РѕРІС‹Рµ РґРµСЃРєСЂРёРїС‚РѕСЂС‹ (Р·Р°С‰РёС‚Р° РѕС‚ Р·РѕРјР±Рё-СЃРѕРєРµС‚РѕРІ).
+        Должно корректно закрыть WS-соединение, остановить обработчик сообщений
+        и освободить файловые дескрипторы (защита от зомби-сокетов).
         """
-        logger.debug("BybitProvider: WS teardown вЂ” РЅРµС‚ Р°РєС‚РёРІРЅРѕРіРѕ СЃРѕРµРґРёРЅРµРЅРёСЏ (MVP REST-only).")
+        logger.debug("BybitProvider: WS teardown — нет активного соединения (MVP REST-only).")
 
     # ------------------------------------------------------------------
-    # Callbacks (РґР»СЏ WatchdogTimer Рё FallbackManager)
+    # Callbacks (для WatchdogTimer и FallbackManager)
     # ------------------------------------------------------------------
 
     def _on_stale(self) -> None:
-        """WatchdogTimer: РґР°РЅРЅС‹Рµ СѓСЃС‚Р°СЂРµР»Рё."""
-        logger.warning("BybitProvider: РґР°РЅРЅС‹Рµ СѓСЃС‚Р°СЂРµР»Рё в†’ Р·Р°РїСЂР°С€РёРІР°РµРј СЂРµРєРѕРЅРЅРµРєС‚.")
+        """WatchdogTimer: данные устарели."""
+        logger.warning("BybitProvider: данные устарели → запрашиваем реконнект.")
         self._fallback.handle_stale()
 
     def _on_recovered(self) -> None:
-        """WatchdogTimer: РґР°РЅРЅС‹Рµ РІРѕСЃСЃС‚Р°РЅРѕРІРёР»РёСЃСЊ."""
-        logger.info("BybitProvider: РґР°РЅРЅС‹Рµ РІРѕСЃСЃС‚Р°РЅРѕРІРёР»РёСЃСЊ.")
+        """WatchdogTimer: данные восстановились."""
+        logger.info("BybitProvider: данные восстановились.")
         self._fallback.handle_ws_recovered()
 
     def _set_status(self, status: ProviderStatus) -> None:
@@ -514,4 +514,4 @@ class BybitProvider(MarketDataProvider):
                 return
             old = self._status
             self._status = status
-        logger.info("BybitProvider: СЃС‚Р°С‚СѓСЃ %s в†’ %s.", old.value, status.value)
+        logger.info("BybitProvider: статус %s → %s.", old.value, status.value)

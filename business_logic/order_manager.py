@@ -1,24 +1,24 @@
 """
-OrderManager вЂ” Р¶РёР·РЅРµРЅРЅС‹Р№ С†РёРєР» РѕСЂРґРµСЂРѕРІ.
+OrderManager — жизненный цикл ордеров.
 
-РџСЂРёРЅС†РёРїС‹ РёР· РўР—:
-  - Р Р°Р±РѕС‚Р°РµС‚ С‚РѕР»СЊРєРѕ СЃ client_order_id (UUID) РІРЅСѓС‚СЂРё Р±РѕС‚Р°.
-  - РњР°РїРїРёРЅРі РІ РїРѕР»Рµ РєРѕРЅРєСЂРµС‚РЅРѕР№ Р±РёСЂР¶Рё (orderLinkId / newClientOrderId)
-    РґРµР»Р°РµС‚ ExchangeAdapter вЂ” OrderManager РѕР± СЌС‚РѕРј РЅРµ Р·РЅР°РµС‚.
-  - pending_client_order_id СЃРѕС…СЂР°РЅСЏРµС‚СЃСЏ РІ bot_state Р”Рћ РѕС‚РїСЂР°РІРєРё РЅР° Р±РёСЂР¶Сѓ.
-    Р­С‚Рѕ РїРѕР·РІРѕР»СЏРµС‚ reconciliation РЅР°Р№С‚Рё РѕСЂРґРµСЂ РїСЂРё СЂРµСЃС‚Р°СЂС‚Рµ РґР°Р¶Рµ РµСЃР»Рё
-    Р±РѕС‚ СѓРїР°Р» РјРµР¶РґСѓ send Рё save.
-  - РўР°Р№РјР°СѓС‚ create_order = BROKER_REQUEST_TIMEOUT_SEC (5 СЃРµРє).
-    РџСЂРё С‚Р°Р№РјР°СѓС‚Рµ вЂ” РЅРµРјРµРґР»РµРЅРЅРѕ StopCraneError (РёСЃС…РѕРґ РЅРµРёР·РІРµСЃС‚РµРЅ, РЅРµ РїРѕРІС‚РѕСЂСЏС‚СЊ).
-  - Retry РїСЂРё СЏРІРЅС‹С… СЃРµС‚РµРІС‹С… РѕС€РёР±РєР°С… (РЅРµ С‚Р°Р№РјР°СѓС‚): СЌРєСЃРїРѕРЅРµРЅС†РёР°Р»СЊРЅР°СЏ Р·Р°РґРµСЂР¶РєР°
-    СЃ jitter (1в†’2в†’4СЃ, max BROKER_MAX_RETRIES).
-  - Cancel РѕСЂРґРµСЂРѕРІ вЂ” РќРРљРћР“Р”Рђ РЅРµ StopCraneError. Retry РґРѕ CANCEL_MAX_RETRIES,
-    РїРѕСЃР»Рµ в†’ StopCraneError (РЅРµР»СЊР·СЏ РїРµСЂРµР№С‚Рё РІ IDLE СЃ РіСЂСЏР·РЅРѕР№ РїРѕР·РёС†РёРµР№).
+Принципы из ТЗ:
+  - Работает только с client_order_id (UUID) внутри бота.
+  - Маппинг в поле конкретной биржи (orderLinkId / newClientOrderId)
+    делает ExchangeAdapter — OrderManager об этом не знает.
+  - pending_client_order_id сохраняется в bot_state ДО отправки на биржу.
+    Это позволяет reconciliation найти ордер при рестарте даже если
+    бот упал между send и save.
+  - Таймаут create_order = BROKER_REQUEST_TIMEOUT_SEC (5 сек).
+    При таймауте — немедленно StopCraneError (исход неизвестен, не повторять).
+  - Retry при явных сетевых ошибках (не таймаут): экспоненциальная задержка
+    СЃ jitter (1в†'2в†'4СЃ, max BROKER_MAX_RETRIES).
+  - Cancel ордеров — НИКОГДА не StopCraneError. Retry до CANCEL_MAX_RETRIES,
+    после → StopCraneError (нельзя перейти в IDLE с грязной позицией).
 
-Р—Р°РІРёСЃРёРјРѕСЃС‚Рё:
-  IBroker.create_order(request)    в†’ OrderCreated
-  IBroker.cancel_order(order_id)   в†’ CancelResult
-  StateManager.commit(old, new)    в†’ BotState  (two-phase commit)
+Зависимости:
+  IBroker.create_order(request)    в†' OrderCreated
+  IBroker.cancel_order(order_id)   в†' CancelResult
+  StateManager.commit(old, new)    в†' BotState  (two-phase commit)
 """
 from __future__ import annotations
 
@@ -43,18 +43,18 @@ logger = logging.getLogger(__name__)
 
 class OrderManager:
     """
-    РЈРїСЂР°РІР»СЏРµС‚ РїРѕСЃС‚Р°РЅРѕРІРєРѕР№ Рё РѕС‚РјРµРЅРѕР№ РѕСЂРґРµСЂРѕРІ.
+    Управляет постановкой и отменой ордеров.
 
-    РљР°Р¶РґС‹Р№ РјРµС‚РѕРґ:
-      1. Р“РµРЅРµСЂРёСЂСѓРµС‚ client_order_id (UUID).
-      2. РЎРѕС…СЂР°РЅСЏРµС‚ pending_client_order_id РІ bot_state С‡РµСЂРµР· StateManager.commit().
-      3. Р’С‹Р·С‹РІР°РµС‚ broker.create_order() / cancel_order().
-      4. РџСЂРё СѓСЃРїРµС…Рµ вЂ” СЃРѕС…СЂР°РЅСЏРµС‚ exchange_order_id, РѕС‡РёС‰Р°РµС‚ pending.
-      5. РџСЂРё С‚Р°Р№РјР°СѓС‚Рµ create_order вЂ” StopCraneError (Р±РµР· retry).
-      6. РџСЂРё СЃРµС‚РµРІРѕР№ РѕС€РёР±РєРµ вЂ” СЌРєСЃРїРѕРЅРµРЅС†РёР°Р»СЊРЅС‹Р№ retry СЃ jitter.
+    Каждый метод:
+      1. Генерирует client_order_id (UUID).
+      2. Сохраняет pending_client_order_id в bot_state через StateManager.commit().
+      3. Вызывает broker.create_order() / cancel_order().
+      4. При успехе — сохраняет exchange_order_id, очищает pending.
+      5. При таймауте create_order — StopCraneError (без retry).
+      6. При сетевой ошибке — экспоненциальный retry с jitter.
     """
 
-    # INSUFFICIENT_FUNDS РєРѕРґС‹ РѕС‚ РёР·РІРµСЃС‚РЅС‹С… Р±РёСЂР¶ (РїРѕРїРѕР»РЅСЏРµС‚СЃСЏ РїСЂРё РёРЅС‚РµРіСЂР°С†РёРё)
+    # INSUFFICIENT_FUNDS коды от известных бирж (пополняется при интеграции)
     _INSUFFICIENT_FUNDS_REASONS = frozenset({
         "insufficient_balance",
         "insufficient_fund",
@@ -84,7 +84,7 @@ class OrderManager:
         self._cancel_max_retries       = cancel_max_retries
 
     # ------------------------------------------------------------------
-    # РџРѕСЃС‚Р°РЅРѕРІРєР° РѕСЂРґРµСЂРѕРІ
+    # Постановка ордеров
     # ------------------------------------------------------------------
 
     def place_entry_order(
@@ -92,31 +92,31 @@ class OrderManager:
         state: "BotState",
         *,
         qty: Decimal,
-        price: Decimal | None,    # None в†’ MARKET
+        price: Decimal | None,    # None в†' MARKET
         ticker: str,
         cycle_id: str,
     ) -> tuple["OrderCreated", "BotState"]:
         """
-        Р’С‹СЃС‚Р°РІРёС‚СЊ РѕСЂРґРµСЂ РЅР° РІС…РѕРґ РІ РїРѕР·РёС†РёСЋ.
+        Выставить ордер на вход в позицию.
 
         Returns:
-          (OrderCreated, new_state) вЂ” new_state СЃРѕРґРµСЂР¶РёС‚ СЃРѕС…СЂР°РЅС‘РЅРЅС‹Р№
+          (OrderCreated, new_state) — new_state содержит сохранённый
           exchange_order_id РІ active_entry_order_id.
 
         Raises:
-          StopCraneError          вЂ” С‚Р°Р№РјР°СѓС‚ (РёСЃС…РѕРґ РЅРµРёР·РІРµСЃС‚РµРЅ).
-          InsufficientFundsError  вЂ” РЅРµС…РІР°С‚РєР° СЃСЂРµРґСЃС‚РІ.
+          StopCraneError          — таймаут (исход неизвестен).
+          InsufficientFundsError  — нехватка средств.
         """
         client_id = self._generate_client_id()
         order_type = "LIMIT" if price is not None else "MARKET"
 
-        # Phase 1: СЃРѕС…СЂР°РЅСЏРµРј pending_client_order_id Р”Рћ РѕС‚РїСЂР°РІРєРё
+        # Phase 1: сохраняем pending_client_order_id ДО отправки
         new_state = self._state_manager.commit(
             state,
             replace(state, pending_client_order_id=client_id),
         )
 
-        # РЎС‚СЂРѕРёРј OrderRequest (РёРЅС‚РµСЂС„РµР№СЃ РёР· Рџ4)
+        # Строим OrderRequest (интерфейс из П4)
         request = self._build_request(
             ticker=ticker,
             side="BUY",
@@ -130,12 +130,12 @@ class OrderManager:
 
         created = self._send_order(request, order_role=OrderType.ENTRY)
 
-        # Р РµРіРёСЃС‚СЂРёСЂСѓРµРј СЂРѕР»СЊ РѕСЂРґРµСЂР° РґР»СЏ PaperBroker.get_pending_fills()
-        # Duck-typing: BybitBroker РЅРµ СЂРµР°Р»РёР·СѓРµС‚ СЌС‚РѕС‚ РјРµС‚РѕРґ вЂ” РІС‹Р·РѕРІ РїСЂРѕРїСѓСЃРєР°РµС‚СЃСЏ.
+        # Регистрируем роль ордера для PaperBroker.get_pending_fills()
+        # Duck-typing: BybitBroker не реализует этот метод — вызов пропускается.
         if hasattr(self._broker, "register_order_role"):
             self._broker.register_order_role(created.exchange_order_id, "ENTRY")
 
-        # Phase 2: СЃРѕС…СЂР°РЅСЏРµРј exchange_order_id
+        # Phase 2: сохраняем exchange_order_id
         new_state = self._state_manager.commit(
             new_state,
             replace(
@@ -148,7 +148,7 @@ class OrderManager:
         self._emitter.emit(
             event_type="ORDER_CREATED",
             level="INFO",
-            message=f"Entry order СЂР°Р·РјРµС‰С‘РЅ: {qty} {ticker} @ {price or 'MARKET'}",
+            message=f"Entry order размещён: {qty} {ticker} @ {price or 'MARKET'}",
             payload={
                 "order_id": created.exchange_order_id,
                 "client_order_id": client_id,
@@ -171,18 +171,18 @@ class OrderManager:
         cycle_id: str,
     ) -> tuple["OrderCreated", "BotState"]:
         """
-        Р’С‹СЃС‚Р°РІРёС‚СЊ TP-РѕСЂРґРµСЂ (LIMIT SELL).
+        Выставить TP-ордер (LIMIT SELL).
 
-        РџРµСЂРµРґ РїРѕСЃС‚Р°РЅРѕРІРєРѕР№ РїСЂРѕРІРµСЂСЏРµС‚ РЅРµС‚ Р»Рё СѓР¶Рµ Р°РєС‚РёРІРЅРѕРіРѕ TP РїРѕ С‚РёРєРµСЂСѓ
-        вЂ” Р·Р°С‰РёС‚Р° РѕС‚ РґСѓР±Р»РёСЂРѕРІР°РЅРёСЏ РїСЂРё СЂРµСЃС‚Р°СЂС‚Рµ.
+        Перед постановкой проверяет нет ли уже активного TP по тикеру
+        — защита от дублирования при рестарте.
         """
         if state.active_tp_order_id is not None:
             logger.warning(
-                "place_tp_order: active_tp_order_id=%s СѓР¶Рµ СЃСѓС‰РµСЃС‚РІСѓРµС‚. "
-                "РџСЂРѕРїСѓСЃРєР°РµРј РїРѕСЃС‚Р°РЅРѕРІРєСѓ РґСѓР±Р»СЏ.",
+                "place_tp_order: active_tp_order_id=%s уже существует. "
+                "Пропускаем постановку дубля.",
                 state.active_tp_order_id,
             )
-            # Р’РѕР·РІСЂР°С‰Р°РµРј Р·Р°РіР»СѓС€РєСѓ вЂ” РІС‹Р·С‹РІР°СЋС‰РёР№ РєРѕРґ РґРѕР»Р¶РµРЅ РїСЂРѕРІРµСЂСЏС‚СЊ
+            # Возвращаем заглушку — вызывающий код должен проверять
             from broker import OrderCreated  # noqa: PLC0415
             stub = OrderCreated(
                 exchange_order_id=state.active_tp_order_id,
@@ -228,7 +228,7 @@ class OrderManager:
         self._emitter.emit(
             event_type="TP_CREATED",
             level="INFO",
-            message=f"TP РІС‹СЃС‚Р°РІР»РµРЅ: {qty} {ticker} @ {price}",
+            message=f"TP выставлен: {qty} {ticker} @ {price}",
             payload={
                 "order_id": created.exchange_order_id,
                 "client_order_id": client_id,
@@ -247,7 +247,7 @@ class OrderManager:
         ticker: str,
         cycle_id: str,
     ) -> tuple["OrderCreated", "BotState"]:
-        """Р’С‹СЃС‚Р°РІРёС‚СЊ DCA-РѕСЂРґРµСЂ (BUY LIMIT РёР»Рё MARKET)."""
+        """Выставить DCA-ордер (BUY LIMIT или MARKET)."""
         client_id = self._generate_client_id()
         order_type = "LIMIT" if price is not None else "MARKET"
 
@@ -272,7 +272,7 @@ class OrderManager:
         if hasattr(self._broker, "register_order_role"):
             self._broker.register_order_role(created.exchange_order_id, "DCA")
 
-        # Р”РѕР±Р°РІР»СЏРµРј Рє СЃРїРёСЃРєСѓ Р°РєС‚РёРІРЅС‹С… DCA-РѕСЂРґРµСЂРѕРІ (РґР»СЏ EAGER-СЂРµР¶РёРјР°)
+        # Добавляем к списку активных DCA-ордеров (для EAGER-режима)
         updated_dca_ids = (*state.active_dca_order_ids, created.exchange_order_id)
 
         new_state = self._state_manager.commit(
@@ -300,7 +300,7 @@ class OrderManager:
         return created, new_state
 
     # ------------------------------------------------------------------
-    # РћС‚РјРµРЅР° РѕСЂРґРµСЂРѕРІ
+    # Отмена ордеров
     # ------------------------------------------------------------------
 
     def cancel_order(
@@ -310,10 +310,10 @@ class OrderManager:
         order_role: str = "UNKNOWN",
     ) -> CancelResult:
         """
-        РћС‚РјРµРЅРёС‚СЊ РѕСЂРґРµСЂ. Retry РґРѕ cancel_max_retries СЃ СЌРєСЃРїРѕРЅРµРЅС†РёР°Р»СЊРЅРѕР№ Р·Р°РґРµСЂР¶РєРѕР№.
+        Отменить ордер. Retry до cancel_max_retries с экспоненциальной задержкой.
 
         Raises:
-          StopCraneError вЂ” РёСЃС‡РµСЂРїР°РЅС‹ РІСЃРµ РїРѕРїС‹С‚РєРё (РЅРµР»СЊР·СЏ РїРµСЂРµР№С‚Рё РІ IDLE).
+          StopCraneError — исчерпаны все попытки (нельзя перейти в IDLE).
         """
         from .errors import StopCraneError as _StopCraneError  # noqa: PLC0415
 
@@ -326,7 +326,7 @@ class OrderManager:
                     self._emitter.emit(
                         event_type="ORDER_CANCELLED",
                         level="WARNING",
-                        message=f"РћСЂРґРµСЂ {order_id} ({order_role}) РѕС‚РјРµРЅС‘РЅ Р±РѕС‚РѕРј",
+                        message=f"Ордер {order_id} ({order_role}) отменён ботом",
                         payload={
                             "order_id": order_id,
                             "initiated_by": "bot",
@@ -336,15 +336,15 @@ class OrderManager:
                     )
                     return result
 
-                # Р‘РёСЂР¶Р° РІРµСЂРЅСѓР»Р° not-confirmed вЂ” retry
+                # Биржа вернула not-confirmed — retry
                 logger.warning(
-                    "cancel_order РЅРµ РїРѕРґС‚РІРµСЂР¶РґС‘РЅ Р±РёСЂР¶РµР№ (РїРѕРїС‹С‚РєР° %d/%d): %s",
+                    "cancel_order не подтверждён биржей (попытка %d/%d): %s",
                     attempt + 1, self._cancel_max_retries, order_id,
                 )
             except Exception as exc:
                 last_error = exc
                 logger.warning(
-                    "РћС€РёР±РєР° РїСЂРё cancel_order (РїРѕРїС‹С‚РєР° %d/%d): %s вЂ” %s",
+                    "Ошибка при cancel_order (попытка %d/%d): %s — %s",
                     attempt + 1, self._cancel_max_retries, order_id, exc,
                 )
 
@@ -353,8 +353,8 @@ class OrderManager:
                 time.sleep(delay)
 
         raise _StopCraneError(
-            f"РќРµ СѓРґР°Р»РѕСЃСЊ РїРѕРґС‚РІРµСЂРґРёС‚СЊ РѕС‚РјРµРЅСѓ РѕСЂРґРµСЂР° {order_id} Р·Р° "
-            f"{self._cancel_max_retries} РїРѕРїС‹С‚РѕРє",
+            f"Не удалось подтвердить отмену ордера {order_id} за "
+            f"{self._cancel_max_retries} попыток",
             invariant="cancel_confirmed_before_idle",
             expected={"order_id": order_id, "status": "CANCELLED"},
             actually_found={"confirmed": False, "error": str(last_error)},
@@ -367,27 +367,27 @@ class OrderManager:
         cycle_id: str,
     ) -> "BotState":
         """
-        Mass-cancel РІСЃРµС… Р°РєС‚РёРІРЅС‹С… DCA-РѕСЂРґРµСЂРѕРІ С‚РµРєСѓС‰РµРіРѕ С†РёРєР»Р°.
+        Mass-cancel всех активных DCA-ордеров текущего цикла.
 
-        РСЃРїРѕР»СЊР·СѓРµС‚СЃСЏ РїСЂРё РїРµСЂРµС…РѕРґРµ IN_POSITION в†’ CLOSING (TP РёСЃРїРѕР»РЅРёР»СЃСЏ).
-        Р‘РµР· mass cancel DCA РѕС‚РєСЂРѕСЋС‚ РЅРѕРІСѓСЋ РїРѕР·РёС†РёСЋ.
+        Используется при переходе IN_POSITION → CLOSING (TP исполнился).
+        Без mass cancel DCA откроют новую позицию.
 
-        Р’С‹Р·С‹РІР°РµС‚ cancel_order() РґР»СЏ РєР°Р¶РґРѕРіРѕ вЂ” РїСЂРё РїРµСЂРІРѕР№ РЅРµСѓРґР°С‡Рµ С‡РµСЂРµР·
-        CANCEL_MAX_RETRIES Р±СЂРѕСЃР°РµС‚ StopCraneError.
+        Вызывает cancel_order() для каждого — при первой неудаче через
+        CANCEL_MAX_RETRIES бросает StopCraneError.
         """
         dca_ids = list(state.active_dca_order_ids)
 
         if not dca_ids:
             return state
 
-        logger.info("Mass cancel %d DCA-РѕСЂРґРµСЂРѕРІ РґР»СЏ С†РёРєР»Р° %s", len(dca_ids), cycle_id)
+        logger.info("Mass cancel %d DCA-ордеров для цикла %s", len(dca_ids), cycle_id)
 
         cancelled = []
         for order_id in dca_ids:
-            self.cancel_order(order_id, order_role="DCA")  # StopCraneError РїСЂРё РЅРµСѓРґР°С‡Рµ
+            self.cancel_order(order_id, order_role="DCA")  # StopCraneError при неудаче
             cancelled.append(order_id)
 
-        # РћС‡РёС‰Р°РµРј СЃРїРёСЃРѕРє Р°РєС‚РёРІРЅС‹С… DCA РІ СЃРѕСЃС‚РѕСЏРЅРёРё
+        # Очищаем список активных DCA в состоянии
         new_state = self._state_manager.commit(
             state,
             replace(state, active_dca_order_ids=()),
@@ -395,7 +395,7 @@ class OrderManager:
         return new_state
 
     # ------------------------------------------------------------------
-    # Р’РЅСѓС‚СЂРµРЅРЅРёРµ РјРµС‚РѕРґС‹
+    # Внутренние методы
     # ------------------------------------------------------------------
 
     def _send_order(
@@ -404,10 +404,10 @@ class OrderManager:
         order_role: OrderType,
     ) -> "OrderCreated":
         """
-        РћС‚РїСЂР°РІРёС‚СЊ РѕСЂРґРµСЂ РЅР° Р±РёСЂР¶Сѓ.
+        Отправить ордер на биржу.
 
-        РўР°Р№РјР°СѓС‚ = РЅРµРјРµРґР»РµРЅРЅРѕ StopCraneError (РёСЃС…РѕРґ РЅРµРёР·РІРµСЃС‚РµРЅ).
-        РЎРµС‚РµРІР°СЏ РѕС€РёР±РєР° (РЅРµ С‚Р°Р№РјР°СѓС‚) = retry СЃ СЌРєСЃРїРѕРЅРµРЅС†РёР°Р»СЊРЅРѕР№ Р·Р°РґРµСЂР¶РєРѕР№.
+        Таймаут = немедленно StopCraneError (исход неизвестен).
+        Сетевая ошибка (не таймаут) = retry с экспоненциальной задержкой.
         INSUFFICIENT_FUNDS = InsufficientFundsError.
         """
         from .errors import StopCraneError as _StopCraneError  # noqa: PLC0415
@@ -421,14 +421,14 @@ class OrderManager:
                 return created
 
             except TimeoutError as exc:
-                # РўР°Р№РјР°СѓС‚ create_order = STOP_CRANE РЅРµРјРµРґР»РµРЅРЅРѕ (РўР— 4 Рё РўР— 7)
+                # Таймаут create_order = STOP_CRANE немедленно (ТЗ 4 и ТЗ 7)
                 raise _StopCraneError(
-                    f"РўР°Р№РјР°СѓС‚ create_order ({self._request_timeout}СЃ) вЂ” "
-                    f"РёСЃС…РѕРґ РѕСЂРґРµСЂР° РЅРµРёР·РІРµСЃС‚РµРЅ. РўСЂРµР±СѓРµС‚СЃСЏ СЂСѓС‡РЅР°СЏ РїСЂРѕРІРµСЂРєР°.",
+                    f"Таймаут create_order ({self._request_timeout}с) — "
+                    f"исход ордера неизвестен. Требуется ручная проверка.",
                     invariant="create_order_outcome_known",
                     expected={
                         "client_order_id": request.client_order_id,
-                        "status": "PENDING РёР»Рё FILLED",
+                        "status": "PENDING или FILLED",
                     },
                     actually_found=None,
                     db_state={
@@ -440,15 +440,15 @@ class OrderManager:
             except Exception as exc:
                 exc_str = str(exc).lower()
 
-                # РџСЂРѕРІРµСЂСЏРµРј РЅРµС…РІР°С‚РєСѓ СЃСЂРµРґСЃС‚РІ
+                # Проверяем нехватку средств
                 if any(s in exc_str for s in self._INSUFFICIENT_FUNDS_REASONS):
                     raise InsufficientFundsError(
-                        f"РќРµС…РІР°С‚РєР° СЃСЂРµРґСЃС‚РІ РїСЂРё РїРѕСЃС‚Р°РЅРѕРІРєРµ {order_role.value}: {exc}",
+                        f"Нехватка средств при постановке {order_role.value}: {exc}",
                         required=str(request.quantity * (request.price or Decimal(0))),
-                        available="unknown",  # СЂРµР°Р»СЊРЅС‹Р№ Р±Р°Р»Р°РЅСЃ РІ TickContext
+                        available="unknown",  # реальный баланс в TickContext
                     ) from exc
 
-                # РЎРµС‚РµРІР°СЏ РѕС€РёР±РєР° вЂ” retry
+                # Сетевая ошибка — retry
                 last_error = exc
                 if attempt < self._max_retries:
                     delay = (
@@ -456,15 +456,15 @@ class OrderManager:
                         + random.uniform(0, self._retry_delay * 0.3)
                     )
                     logger.warning(
-                        "РЎРµС‚РµРІР°СЏ РѕС€РёР±РєР° РїСЂРё create_order (РїРѕРїС‹С‚РєР° %d/%d), "
-                        "retry С‡РµСЂРµР· %.1fСЃ: %s",
+                        "Сетевая ошибка при create_order (попытка %d/%d), "
+                        "retry через %.1fс: %s",
                         attempt + 1, self._max_retries + 1, delay, exc,
                     )
                     time.sleep(delay)
                 else:
                     raise
 
-        raise RuntimeError(f"РќРµРѕР¶РёРґР°РЅРЅС‹Р№ РІС‹С…РѕРґ РёР· retry-С†РёРєР»Р°: {last_error}")
+        raise RuntimeError(f"Неожиданный выход из retry-цикла: {last_error}")
 
     @staticmethod
     def _generate_client_id() -> str:
@@ -482,7 +482,7 @@ class OrderManager:
         bot_id: str,
         cycle_id: str,
     ) -> "OrderRequest":
-        """РЎРѕР±СЂР°С‚СЊ OrderRequest РёР· Рџ4."""
+        """Собрать OrderRequest из П4."""
         from broker import OrderRequest  # noqa: PLC0415
         return OrderRequest(
             ticker=ticker,
