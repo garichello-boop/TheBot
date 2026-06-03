@@ -1,4 +1,6 @@
 """
+business_logic/bot_loop.py
+
 BotLoop — главный бесконечный цикл бота (Пункт 7).
 
 Оркестрирует все подсистемы в единый последовательный поток.
@@ -17,6 +19,17 @@ BotLoop — главный бесконечный цикл бота (Пункт 
 
 Kill-switch: CRITICAL_ERROR_THRESHOLD подряд → KillSwitchError.
 TickSkippedError не инкрементирует счётчик ошибок.
+
+Trailing TP (добавлено в этой версии):
+  Когда TRAILING_TP_ENABLED=True в strategy_params, бот отслеживает
+  максимум цены (high-water mark) после входа в позицию.
+  После того как цена впервые превысила уровень обычного TP (активация),
+  включается трейлинг: позиция закрывается когда цена откатывается на
+  TRAILING_TP_PCT% от достигнутого максимума.
+  Проверка запускается ПОСЛЕ _apply_order_events (чтобы видеть актуальный
+  cycle_status) и ДО DecisionEngine.
+  Ограничение: high-water mark хранится в памяти и сбрасывается при
+  рестарте бота.
 """
 from __future__ import annotations
 
@@ -63,7 +76,7 @@ class BotLoop:
     """
     Главный цикл бота.
 
-    Инициализируется при старте с уже созданными подсистемами.
+    Инициализируется один раз при старте с уже созданными подсистемами.
     run() запускает бесконечный цикл. Для остановки снаружи
     установить bot_configs.status=STOPPED в PostgreSQL.
 
@@ -168,6 +181,12 @@ class BotLoop:
 
         # Снапшот параметров текущего цикла (обновляется при смене цикла)
         self._cycle_snapshot: "CycleSnapshot | None" = None
+
+        # Trailing TP: максимум цены с момента входа в позицию.
+        # None = нет активной позиции или бот только запустился.
+        # Сбрасывается при старте нового цикла (_execute_enter).
+        # Ограничение: теряется при рестарте бота (in-memory).
+        self._trailing_tp_high: Decimal | None = None
 
         # Счётчик последовательных ошибок для kill-switch
         self._consecutive_errors: int = 0
@@ -314,7 +333,7 @@ class BotLoop:
             return
 
         # Шаг 3: reconciliation при расхождении ----------------------
-        # Если cycle_status=STOP_CRANE — торговля уже заблокирована,
+        # Если cycle_status=STOP_CRANE — торговля заблокирована,
         # DecisionEngine вернёт WAIT.
         # Развёрнутый reconciliation происходит в StateRecovery при старте.
         if ctx.cycle_status == "STOP_CRANE":
@@ -328,6 +347,19 @@ class BotLoop:
 
         # Шаг 5: применить события ордеров --------------------------
         state = self._apply_order_events(ctx)
+
+        # ── Trailing TP check ────────────────────────────────────────
+        # Выполняется ПОСЛЕ apply_order_events (чтобы видеть актуальный
+        # cycle_status после возможного fill) и ДО DecisionEngine
+        # (чтобы trailing TP имел приоритет над WAIT).
+        # Только в IN_POSITION — в остальных статусах нет смысла.
+        if str(state.cycle_status) == "IN_POSITION":
+            if self._evaluate_trailing_tp(ctx, state):
+                state = self._execute_trailing_tp_close(ctx, state)
+                self._balance_reconciler.maybe_check(ctx)
+                self._heartbeat.maybe_emit(ctx)
+                return
+        # ─────────────────────────────────────────────────────────────
 
         # Шаг 6: сигнал стратегии -----------------------------------
         signal = self._strategy.evaluate(
@@ -515,6 +547,9 @@ class BotLoop:
         # Обновляем CycleSnapshot для нового цикла (шаг 4 ТЗ)
         self._cycle_snapshot = self._config_watcher.create_snapshot()
 
+        # Сбрасываем trailing TP при старте нового цикла
+        self._trailing_tp_high = None
+
         # FSM: IDLE → ENTERING
         state = self._state_manager.commit(
             state,
@@ -572,7 +607,7 @@ class BotLoop:
         """PLACE_TP: выставить TP после исполнения entry.
 
         tp_price может быть None если DecisionEngine передал None
-        (Strategy пересчитает на основе avg_price). В этом случае
+        (Strategy пересчитывает на основе avg_price). В этом случае
         запрашиваем TP-цену у стратегии напрямую — аналогично
         _execute_replace_tp.
         """
@@ -689,6 +724,7 @@ class BotLoop:
             ),
         )
         self._cycle_snapshot = None
+        self._trailing_tp_high = None
 
         self._emitter.emit(
             event_type="ORDER_CANCELLED",
@@ -717,6 +753,7 @@ class BotLoop:
 
         if status == "COMPLETE":
             self._cycle_snapshot = None
+            self._trailing_tp_high = None
             logger.info("Close Protocol завершён — FSM в IDLE")
 
         return state
@@ -755,6 +792,7 @@ class BotLoop:
             self._close_protocol._close_remainder_mode = original_mode  # noqa: SLF001
 
         self._cycle_snapshot = None
+        self._trailing_tp_high = None
         return state
 
     def _execute_sl_close(
@@ -805,6 +843,7 @@ class BotLoop:
 
         if status == "COMPLETE":
             self._cycle_snapshot = None
+            self._trailing_tp_high = None
             logger.info("SL Close Protocol завершён — FSM в IDLE")
 
         return state
@@ -815,7 +854,7 @@ class BotLoop:
         """SET_CLOSE_ONLY: установить bot_configs.status=CLOSE_ONLY."""
         logger.warning("SET_CLOSE_ONLY: %s", reason)
 
-        # Устанавливаем через ConfigRepository (не StateManager — это bot_configs)
+        # Устанавливаем через ConfigWatcher (не StateManager — это bot_configs)
         try:
             self._config_watcher.set_close_only(ctx.user_id, ctx.bot_id)
         except Exception as exc:
@@ -867,6 +906,149 @@ class BotLoop:
                     "attempt":      attempt + 1,
                 },
             )
+
+        return state
+
+    # ------------------------------------------------------------------
+    # Trailing TP
+    # ------------------------------------------------------------------
+
+    def _evaluate_trailing_tp(
+        self,
+        ctx: TickContext,
+        state: "BotState",
+    ) -> bool:
+        """
+        Обновить high-water mark и проверить условие срабатывания trailing TP.
+
+        Возвращает True если позицию нужно закрыть.
+        Обновляет self._trailing_tp_high как побочный эффект.
+
+        Логика:
+          1. TRAILING_TP_ENABLED должен быть True в cycle_snapshot.
+          2. Активация: high-water mark должен превысить
+             avg_price * (1 + tp_pct) — т.е. цена побывала выше
+             уровня обычного TP хотя бы один раз за цикл.
+          3. Срабатывание: current_bid <= high_water * (1 - TRAILING_TP_PCT/100)
+             И trailing уровень сам по себе выше activation_price.
+
+        Ограничение: high_water сбрасывается при рестарте бота.
+        При рестарте трейлинг начинается с текущей цены на первом тике.
+        """
+        if self._cycle_snapshot is None:
+            return False
+
+        params = self._cycle_snapshot.strategy_params
+
+        if not params.get("TRAILING_TP_ENABLED", False):
+            return False
+
+        trail_pct_raw = params.get("TRAILING_TP_PCT", 1.0)
+        try:
+            trail_pct = Decimal(str(trail_pct_raw))
+        except Exception:
+            logger.warning("TRAILING_TP_PCT невалиден: %r — пропускаем", trail_pct_raw)
+            return False
+        if trail_pct <= 0:
+            return False
+
+        avg_price = state.position_avg_price
+        if avg_price is None or avg_price <= 0:
+            return False
+
+        current_bid = ctx.price_data.bid
+
+        # Обновляем high-water mark
+        if self._trailing_tp_high is None or current_bid > self._trailing_tp_high:
+            self._trailing_tp_high = current_bid
+
+        # Уровень активации = avg_price * (1 + tp_pct)
+        # tp_pct в strategy_params хранится как десятичная доля (0.035 = 3.5%)
+        tp_pct_raw = params.get("tp_pct") or params.get("TAKE_PROFIT") or 0.02
+        try:
+            tp_pct = Decimal(str(tp_pct_raw))
+        except Exception:
+            return False
+
+        activation_price = avg_price * (1 + tp_pct)
+
+        # Трейлинг активируется только если high_water достиг зоны прибыли
+        if self._trailing_tp_high <= activation_price:
+            return False
+
+        # Вычисляем уровень срабатывания трейлинга
+        trailing_trigger = self._trailing_tp_high * (1 - trail_pct / 100)
+
+        # Защита: trailing уровень сам должен быть выше activation_price,
+        # чтобы не опустить фактический TP ниже изначального
+        if trailing_trigger <= activation_price:
+            return False
+
+        # Срабатываем если текущая цена опустилась до trailing уровня
+        triggered = current_bid <= trailing_trigger
+
+        if triggered:
+            logger.info(
+                "Trailing TP условие выполнено: bid=%s <= trigger=%s "
+                "(high=%s, trail=%s%%, activation=%s)",
+                current_bid, trailing_trigger,
+                self._trailing_tp_high, trail_pct, activation_price,
+            )
+
+        return triggered
+
+    def _execute_trailing_tp_close(
+        self,
+        ctx: TickContext,
+        state: "BotState",
+    ) -> "BotState":
+        """
+        Trailing TP сработал: закрыть позицию.
+
+        Эмитирует TRAILING_TP_TRIGGERED, переводит FSM → CLOSING (reason=TP),
+        затем запускает CloseProtocol. Структура аналогична _execute_sl_close.
+
+        CloseProtocol отменит TP-ордер (если есть) и закроет позицию.
+        closing_reason=TP → CloseProtocol использует стандартный (не MARKET)
+        режим закрытия, если только SL_MAX_MARKET_SLIPPAGE_PCT не превышен.
+        """
+        avg_price   = state.position_avg_price or Decimal(0)
+        current_bid = ctx.price_data.bid
+        profit_pct  = (
+            (current_bid - avg_price) / avg_price * 100
+            if avg_price > 0 else Decimal(0)
+        )
+
+        self._emitter.emit(
+            event_type="TRAILING_TP_TRIGGERED",
+            level="INFO",
+            message=(
+                f"Trailing TP сработал: bid={current_bid}, "
+                f"peak={self._trailing_tp_high}, profit≈{profit_pct:.2f}%"
+            ),
+            payload={
+                "high_water_mark": str(self._trailing_tp_high),
+                "current_bid":     str(current_bid),
+                "avg_price":       str(avg_price),
+                "profit_pct":      str(profit_pct.quantize(Decimal("0.01"))),
+                "cycle_id":        state.cycle_id,
+            },
+        )
+
+        # FSM → CLOSING с причиной TP (аналог обычного TP fill)
+        state = self._state_manager.transition(
+            state,
+            CycleStatus.CLOSING,
+            closing_reason=ClosingReason.TP,
+        )
+
+        # CloseProtocol: отменит TP-ордер и закроет позицию
+        state, status = self._close_protocol.run(ctx, state)
+
+        if status == "COMPLETE":
+            self._cycle_snapshot = None
+            self._trailing_tp_high = None
+            logger.info("Trailing TP Close Protocol завершён — FSM в IDLE")
 
         return state
 

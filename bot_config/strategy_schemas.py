@@ -19,7 +19,7 @@ Pydantic-схемы для валидации strategy_params из bot_configs.s
     обязательные поля имеют дефолты.
   - Все поля в текущих схемах имеют дефолты → пустой {} config валиден.
     Это позволяет постепенно населять params без немедленного слома бота.
-  - Коерция типов включена (Pydantic v2 default):
+  - Коэрция типов включена (Pydantic v2 default):
     "5.0" → 5.0, "20" → 20, "true" → True.
 
 Добавление новой стратегии:
@@ -115,8 +115,19 @@ class MeanReversionParams(BaseStrategyParams):
     Вход: цена касается нижней полосы (BB_MULT стандартных отклонений от MA).
     Выход (TP): цена возвращается к средней линии (MA).
 
-    Все поля имеют дефолты — пустой strategy_params {} валиден.
+    Все поля имеют дефолты → пустой strategy_params {} валиден.
     Бот использует дефолты до тех пор, пока оператор не задаст явные значения.
+
+    Trailing TP (TRAILING_TP_ENABLED / TRAILING_TP_PCT):
+      Когда включён, бот отслеживает максимум цены после входа.
+      После того как цена впервые превысила уровень обычного TP (активация),
+      начинает работать трейлинг: TP поднимается вслед за максимумом.
+      Позиция закрывается когда текущая цена откатывается на TRAILING_TP_PCT%
+      от достигнутого максимума. Статичный TP-ордер остаётся на бирже как
+      подстраховка на случай гэпа вверх.
+
+      Ограничение (paper trading): максимум хранится в памяти и сбрасывается
+      при рестарте бота. При рестарте трейлинг начинается с текущей цены.
     """
 
     BB_PERIOD: int = Field(
@@ -152,6 +163,30 @@ class MeanReversionParams(BaseStrategyParams):
         description="Максимальное количество DCA-усреднений в одном цикле.",
     )
 
+    # ------------------------------------------------------------------
+    # Trailing TP
+    # ------------------------------------------------------------------
+
+    TRAILING_TP_ENABLED: bool = Field(
+        default=False,
+        description=(
+            "Включить скользящий take-profit. "
+            "Когда True, TP следует за максимумом цены после активации."
+        ),
+    )
+    TRAILING_TP_PCT: float = Field(
+        default=1.0,
+        gt=0,
+        description=(
+            "Откат от максимума для срабатывания trailing TP, в процентах "
+            "(например 1.0 = 1%). Обязателен когда TRAILING_TP_ENABLED=True."
+        ),
+    )
+
+    # ------------------------------------------------------------------
+    # Validators
+    # ------------------------------------------------------------------
+
     @field_validator("BB_MULT", "INVEST_SHARE", "TAKE_PROFIT", mode="before")
     @classmethod
     def coerce_float_fields(cls, v: Any) -> Any:
@@ -173,6 +208,37 @@ class MeanReversionParams(BaseStrategyParams):
             return int(v)
         except (TypeError, ValueError):
             return v
+
+    @field_validator("TRAILING_TP_ENABLED", mode="before")
+    @classmethod
+    def coerce_trailing_tp_enabled(cls, v: Any) -> Any:
+        """Принять 'true'/'false' строки из JSONB."""
+        if isinstance(v, str):
+            return v.lower() in ("true", "1", "yes")
+        return v
+
+    @field_validator("TRAILING_TP_PCT", mode="before")
+    @classmethod
+    def coerce_trailing_tp_pct(cls, v: Any) -> Any:
+        """Принять строковые значения ('1.0') из JSONB."""
+        if v is None:
+            return v
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return v
+
+    @model_validator(mode="after")
+    def validate_trailing_tp_consistency(self) -> "MeanReversionParams":
+        """TRAILING_TP_ENABLED=True требует TRAILING_TP_PCT > 0."""
+        if not self.TRAILING_TP_ENABLED:
+            return self
+        if self.TRAILING_TP_PCT is None or self.TRAILING_TP_PCT <= 0:
+            raise ValueError(
+                "TRAILING_TP_PCT должен быть > 0 когда TRAILING_TP_ENABLED=True. "
+                "Укажите TRAILING_TP_PCT в процентах, например 1.0 для 1%."
+            )
+        return self
 
 
 # ---------------------------------------------------------------------------
