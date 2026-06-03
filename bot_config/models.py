@@ -3,11 +3,12 @@ bot_config/models.py
 
 Data models for bot configuration (Point 5).
 
-BotConfig     — immutable snapshot of a bot_configs row.
-CycleSnapshot — freezes strategy_params at the start of each trading cycle.
-                The bot works exclusively with this object during the cycle;
-                WFO updates to bot_configs do not affect the open position.
-BotStatus     — valid values for the status column.
+BotConfig          — immutable snapshot of a bot_configs row.
+CycleSnapshot      — freezes strategy_params at the start of each trading cycle.
+                     The bot works exclusively with this object during the cycle;
+                     WFO updates to bot_configs do not affect the open position.
+BotStatus          — valid values for the status column.
+ConfigHistoryRow   — one row from bot_configs_history (audit trail).
 """
 
 from __future__ import annotations
@@ -184,4 +185,79 @@ class CycleSnapshot:
             f"CycleSnapshot(version={self.config_version}, "
             f"started_at={self.started_at.isoformat()}, "
             f"params={list(self.strategy_params)})"
+        )
+
+
+# ---------------------------------------------------------------------------
+# ConfigHistoryRow
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class ConfigHistoryRow:
+    """
+    Immutable representation of one bot_configs_history row.
+
+    Each row is a full snapshot of the bot_configs state captured by the
+    audit trigger after an INSERT or UPDATE. The history is append-only and
+    never modified after creation.
+
+    Fields:
+        id             — surrogate primary key (BIGSERIAL), useful for ordering.
+        config_version — mirrors bot_configs.config_version at the moment of
+                         the change. Use this value with rollback().
+        changed_by     — who triggered the change:
+                           'operator'               direct SQL / pgAdmin edit
+                           'wfo'                    WFO script with SET LOCAL GUC
+                           'bot'                    bot internal set_status()
+                           'rollback_to_vN:actor'   rollback() call
+                           'unknown'                no GUC set before the DML
+        changed_at     — wall-clock time (UTC) when the trigger fired.
+
+    Usage:
+        history = repo.get_history("igor", "btc_paper_01", limit=10)
+        for h in history:
+            print(h.config_version, h.changed_by, h.strategy_params)
+    """
+    id:              int
+    user_id:         str
+    bot_id:          str
+    config_version:  int
+    ticker:          str
+    strategy_name:   str
+    strategy_params: dict[str, Any]
+    virtual_balance: Decimal
+    status:          BotStatus
+    changed_by:      str
+    changed_at:      datetime
+
+    # ------------------------------------------------------------------
+    # Factory
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def from_row(cls, row: dict[str, Any]) -> ConfigHistoryRow:
+        """Build from a psycopg2 RealDictCursor row."""
+        return cls(
+            id              = int(row["id"]),
+            user_id         = row["user_id"],
+            bot_id          = row["bot_id"],
+            config_version  = int(row["config_version"]),
+            ticker          = row["ticker"],
+            strategy_name   = row["strategy_name"],
+            strategy_params = dict(row["strategy_params"] or {}),
+            virtual_balance = (
+                row["virtual_balance"]
+                if isinstance(row["virtual_balance"], Decimal)
+                else Decimal(str(row["virtual_balance"]))
+            ),
+            status     = BotStatus(row["status"]),
+            changed_by = row["changed_by"],
+            changed_at = row["changed_at"],
+        )
+
+    def __repr__(self) -> str:
+        return (
+            f"ConfigHistoryRow(id={self.id}, bot_id={self.bot_id!r}, "
+            f"version={self.config_version}, changed_by={self.changed_by!r}, "
+            f"changed_at={self.changed_at.isoformat()})"
         )

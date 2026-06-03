@@ -2,6 +2,14 @@
 bot_config/repository.py
 
 Reads bot configuration from PostgreSQL.
+
+ConfigRepository  — loads, reloads, and mutates bot_configs rows.
+                    Acquires a session-level advisory lock at startup
+                    (see ADR-001 below).
+
+New in this version:
+    get_history()  — returns audit trail from bot_configs_history.
+    rollback()     — restores strategy_params from a history entry.
 """
 
 from __future__ import annotations
@@ -13,7 +21,7 @@ import psycopg2
 import psycopg2.extras
 
 from db import get_connection, transaction
-from .models import BotConfig, BotStatus
+from .models import BotConfig, BotStatus, ConfigHistoryRow
 from .validator import ConfigValidator, ValidationResult
 
 logger = logging.getLogger(__name__)
@@ -66,6 +74,10 @@ class BotConfigInvalidError(Exception):
     """Config loaded from DB failed validation."""
 
 
+class ConfigHistoryNotFoundError(Exception):
+    """No bot_configs_history entry found for the requested config_version."""
+
+
 # ---------------------------------------------------------------------------
 # Repository
 # ---------------------------------------------------------------------------
@@ -90,6 +102,10 @@ class ConfigRepository:
         config = repo.reload(user_id, bot_id)  # before new cycle: no lock
         ...
         repo.release(user_id, bot_id)           # shutdown: release lock
+
+    Audit trail (new):
+        history = repo.get_history(user_id, bot_id, limit=20)
+        config  = repo.rollback(user_id, bot_id, to_version=3)
     """
 
     def __init__(
@@ -208,16 +224,19 @@ class ConfigRepository:
         Raises:
             BotConfigNotFoundError: row not found in bot_configs.
         """
-        query = """
-            UPDATE bot_configs
-               SET status         = %s,
-                   config_version = config_version + 1,
-                   updated_at     = NOW()
-             WHERE user_id = %s
-               AND bot_id  = %s
-        """
         with transaction() as cur:
-            cur.execute(query, (status.value, user_id, bot_id))
+            cur.execute("SET LOCAL app.changed_by = 'bot'")
+            cur.execute(
+                """
+                UPDATE bot_configs
+                   SET status         = %s,
+                       config_version = config_version + 1,
+                       updated_at     = NOW()
+                 WHERE user_id = %s
+                   AND bot_id  = %s
+                """,
+                (status.value, user_id, bot_id),
+            )
             if cur.rowcount == 0:
                 raise BotConfigNotFoundError(
                     f"set_status: no row in bot_configs for "
@@ -228,6 +247,143 @@ class ConfigRepository:
             "ConfigRepository: status set to %r for %s/%s.",
             status.value, user_id, bot_id,
         )
+
+    # ------------------------------------------------------------------
+    # Audit trail: history
+    # ------------------------------------------------------------------
+
+    def get_history(
+        self,
+        user_id: str,
+        bot_id: str,
+        limit: int = 20,
+    ) -> list[ConfigHistoryRow]:
+        """
+        Return the N most recent history entries for a bot, newest first.
+
+        Each entry is a full snapshot of bot_configs at the moment of an
+        INSERT or UPDATE (captured by the audit trigger).
+
+        Args:
+            limit: maximum rows to return (default 20, pass 0 for all).
+
+        Returns:
+            List of ConfigHistoryRow ordered by id DESC (newest first).
+            Empty list if no history exists yet (e.g. before first change).
+        """
+        query = """
+            SELECT id, user_id, bot_id, config_version,
+                   ticker, strategy_name, strategy_params,
+                   virtual_balance, status, changed_by, changed_at
+              FROM bot_configs_history
+             WHERE user_id = %s AND bot_id = %s
+             ORDER BY id DESC
+             LIMIT %s
+        """
+        with transaction() as cur:
+            cur.execute(query, (user_id, bot_id, limit))
+            rows = cur.fetchall()
+
+        return [ConfigHistoryRow.from_row(dict(r)) for r in (rows or [])]
+
+    # ------------------------------------------------------------------
+    # Audit trail: rollback
+    # ------------------------------------------------------------------
+
+    def rollback(
+        self,
+        user_id: str,
+        bot_id: str,
+        to_version: int,
+        changed_by: str = "operator",
+    ) -> BotConfig:
+        """
+        Restore strategy_params from a specific history version.
+
+        Reads bot_configs_history where config_version = to_version, then
+        applies its strategy_params to the live bot_configs row, incrementing
+        config_version by 1 so ConfigWatcher detects the change on the next
+        cycle boundary.
+
+        The audit trigger captures this rollback with:
+            changed_by = "rollback_to_v{to_version}:{changed_by}"
+
+        Args:
+            to_version: config_version of the history entry to restore.
+                        Use get_history() to list available versions.
+            changed_by: who initiated the rollback (default "operator").
+                        Pass "wfo" if called from a WFO script.
+
+        Returns:
+            Updated BotConfig with the new (incremented) config_version.
+
+        Raises:
+            ConfigHistoryNotFoundError: no history entry for to_version.
+            BotConfigNotFoundError:     bot_configs row not found.
+
+        Note: no position check is performed. The operator is responsible
+        for deciding whether it is safe to roll back strategy_params while
+        a cycle is active. If the bot is running, the new params take effect
+        on the next tick via ConfigWatcher's normal hot-reload flow.
+        """
+        guc_value = f"rollback_to_v{to_version}:{changed_by}"
+
+        with transaction() as cur:
+            # Tag this transaction so the audit trigger records the rollback source.
+            cur.execute("SET LOCAL app.changed_by = %s", (guc_value,))
+
+            # 1. Fetch target strategy_params from history.
+            cur.execute(
+                """
+                SELECT strategy_params
+                  FROM bot_configs_history
+                 WHERE user_id = %s AND bot_id = %s AND config_version = %s
+                 ORDER BY id DESC
+                 LIMIT 1
+                """,
+                (user_id, bot_id, to_version),
+            )
+            hist = cur.fetchone()
+            if hist is None:
+                raise ConfigHistoryNotFoundError(
+                    f"No history entry found for {user_id!r}/{bot_id!r} "
+                    f"at config_version={to_version}. "
+                    f"Call get_history() to list available versions."
+                )
+
+            strategy_params = dict(hist["strategy_params"] or {})
+
+            # 2. Apply rollback. RETURNING avoids a second round-trip to read
+            #    the new state. The trigger fires here and writes to history.
+            cur.execute(
+                """
+                UPDATE bot_configs
+                   SET strategy_params = %s,
+                       config_version  = config_version + 1,
+                       updated_at      = NOW()
+                 WHERE user_id = %s AND bot_id = %s
+                 RETURNING
+                    user_id, bot_id, ticker, exchange,
+                    strategy_name, strategy_params, virtual_balance,
+                    status, config_version, created_at, updated_at
+                """,
+                (psycopg2.extras.Json(strategy_params), user_id, bot_id),
+            )
+            row = cur.fetchone()
+
+        if row is None:
+            raise BotConfigNotFoundError(
+                f"rollback: no row in bot_configs for "
+                f"user_id={user_id!r}, bot_id={bot_id!r}."
+            )
+
+        new_config = BotConfig.from_row(dict(row))
+        logger.info(
+            "ConfigRepository: rolled back %s/%s strategy_params "
+            "from history v%d → new config_version=%d (changed_by=%r).",
+            user_id, bot_id, to_version, new_config.config_version, changed_by,
+        )
+        return new_config
 
     # ------------------------------------------------------------------
     # Advisory lock internals
