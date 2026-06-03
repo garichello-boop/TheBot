@@ -1,4 +1,7 @@
-from bot_state.models import BotState, BotRegistry, CycleStatus, OperationalStatus
+from bot_state.models import (
+    BotState, BotRegistry, CycleStatus, OperationalStatus,
+    ClosingReason, StateHistoryRow,
+)
 from bot_state.state_fsm import StateFSM, InvalidTransitionError
 from bot_state.state_repo import StateRepository, DuplicateBotError
 from bot_state.registry_repo import RegistryRepository
@@ -10,6 +13,8 @@ __all__ = [
     "BotRegistry",
     "CycleStatus",
     "OperationalStatus",
+    "ClosingReason",
+    "StateHistoryRow",
     "StateFSM",
     "InvalidTransitionError",
     "StateRepository",

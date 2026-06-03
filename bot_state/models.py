@@ -23,10 +23,10 @@ class ClosingReason(str, Enum):
     Set when FSM transitions into CLOSING (by DecisionEngine or Close Protocol).
     Reset to NULL automatically when FSM transitions CLOSING → IDLE.
 
-    TP            — TP-ордер исполнился (стандартный выход).
-    SL            — Сработал стоп-лосс (bid <= avg_price * (1 - SL_PCT/100)).
-    FORCE_CLOSE   — Оператор выставил status=FORCE_CLOSE в bot_configs.
-    MANUAL_CANCEL — TP отменён вручную (бот → CLOSE_ONLY → CLOSING).
+    TP            – TP-ордер исполнился (стандартный выход).
+    SL            – Сработал стоп-лосс (bid <= avg_price * (1 - SL_PCT/100)).
+    FORCE_CLOSE   – Оператор выставил status=FORCE_CLOSE в bot_configs.
+    MANUAL_CANCEL – TP отменён вручную (бот → CLOSE_ONLY → CLOSING).
     """
     TP            = "TP"
     SL            = "SL"
@@ -71,7 +71,7 @@ class BotState:
     closing_reason: Optional[ClosingReason] = None
     """
     Причина перехода в CLOSING. NULL во всех состояниях кроме CLOSING.
-    Используется в Close Protocol (шаг 9): если SL — форсировать MARKET.
+    Используется в Close Protocol (шаг 9): если SL – форсировать MARKET.
     Сбрасывается в NULL автоматически при переходе CLOSING → IDLE
     (StateManager.transition() обрабатывает это прозрачно).
     """
@@ -187,4 +187,111 @@ class BotRegistry:
             started_at=row.get("started_at"),
             stopped_at=row.get("stopped_at"),
             error_message=row.get("error_message"),
+        )
+
+
+# ---------------------------------------------------------------------------
+# StateHistoryRow
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class StateHistoryRow:
+    """
+    One row from bot_state_history — a snapshot of bot_state at the moment
+    of an FSM cycle_status transition.
+
+    Written automatically by the _bot_state_fsm_audit trigger:
+      - On INSERT into bot_state (initial IDLE state at bot startup).
+      - On UPDATE where cycle_status changes (every FSM transition).
+
+    Fields:
+        old_cycle_status  — status before the transition; None on initial INSERT.
+        new_cycle_status  — status after the transition.
+        trigger_op        — 'INSERT' (initialization) or 'UPDATE' (transition).
+        recorded_at       — wall-clock UTC timestamp when the trigger fired.
+
+    Excluded fields (not useful for FSM investigation):
+        active_dca_order_ids  — array, covered by dca_count.
+        pending_client_order_id — internal order-tracking detail.
+
+    Usage:
+        history = repo.get_history("igor", "btc_paper_01", limit=20)
+        for h in history:
+            print(h.old_cycle_status, "→", h.new_cycle_status, h.recorded_at)
+    """
+    id:                     int
+    user_id:                str
+    bot_id:                 str
+    old_cycle_status:       Optional[CycleStatus]
+    new_cycle_status:       CycleStatus
+    version:                int
+    cycle_id:               Optional[str]
+    virtual_balance_free:   Decimal
+    virtual_balance_locked: Decimal
+    position_qty:           Decimal
+    position_avg_price:     Optional[Decimal]
+    dca_count:              int
+    quote_spent:            Decimal
+    quote_received:         Decimal
+    last_applied_trade_id:  Optional[str]
+    active_entry_order_id:  Optional[str]
+    active_tp_order_id:     Optional[str]
+    closing_reason:         Optional[ClosingReason]
+    trigger_op:             str
+    recorded_at:            datetime
+
+    # ------------------------------------------------------------------
+    # Factory
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def from_row(cls, row: dict) -> "StateHistoryRow":
+        """Build from a psycopg2 RealDictCursor row."""
+        def _dec(val) -> Decimal:
+            return val if isinstance(val, Decimal) else Decimal(str(val))
+
+        raw_old = row.get("old_cycle_status")
+        raw_cr  = row.get("closing_reason")
+
+        return cls(
+            id                     = int(row["id"]),
+            user_id                = row["user_id"],
+            bot_id                 = row["bot_id"],
+            old_cycle_status       = CycleStatus(raw_old) if raw_old is not None else None,
+            new_cycle_status       = CycleStatus(row["new_cycle_status"]),
+            version                = int(row["version"]),
+            cycle_id               = row.get("cycle_id"),
+            virtual_balance_free   = _dec(row["virtual_balance_free"]),
+            virtual_balance_locked = _dec(row["virtual_balance_locked"]),
+            position_qty           = _dec(row["position_qty"]),
+            position_avg_price     = (
+                _dec(row["position_avg_price"])
+                if row.get("position_avg_price") is not None else None
+            ),
+            dca_count              = int(row.get("dca_count") or 0),
+            quote_spent            = _dec(row["quote_spent"]),
+            quote_received         = _dec(row["quote_received"]),
+            last_applied_trade_id  = row.get("last_applied_trade_id"),
+            active_entry_order_id  = row.get("active_entry_order_id"),
+            active_tp_order_id     = row.get("active_tp_order_id"),
+            closing_reason         = ClosingReason(raw_cr) if raw_cr is not None else None,
+            trigger_op             = row["trigger_op"],
+            recorded_at            = row["recorded_at"],
+        )
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    @property
+    def transition_label(self) -> str:
+        """Human-readable transition string, e.g. 'IDLE → ENTERING'."""
+        old = self.old_cycle_status.value if self.old_cycle_status else "—"
+        return f"{old} → {self.new_cycle_status.value}"
+
+    def __repr__(self) -> str:
+        return (
+            f"StateHistoryRow(id={self.id}, bot_id={self.bot_id!r}, "
+            f"v={self.version}, {self.transition_label!r}, "
+            f"recorded_at={self.recorded_at.isoformat()})"
         )

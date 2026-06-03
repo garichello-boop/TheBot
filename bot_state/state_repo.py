@@ -5,7 +5,7 @@ from decimal import Decimal
 from typing import Optional
 
 from db.connection import get_connection, transaction
-from bot_state.models import BotState, ClosingReason, CycleStatus
+from bot_state.models import BotState, ClosingReason, CycleStatus, StateHistoryRow
 
 
 class DuplicateBotError(Exception):
@@ -27,6 +27,10 @@ class StateRepository:
     get_connection() / transaction() use the globally configured pool
     (initialised by create_pool() in bot.py). self._pool is stored for
     future direct-pool usage.
+
+    Audit trail:
+        get_history() reads bot_state_history — the append-only FSM
+        transition log written by the _bot_state_fsm_audit trigger.
     """
 
     def __init__(self, db_pool) -> None:
@@ -154,6 +158,59 @@ class StateRepository:
         params = _to_update_params(state)
         with conn.cursor() as cur:
             cur.execute(sql, params)
+
+    # ------------------------------------------------------------------
+    # Audit trail: FSM history
+    # ------------------------------------------------------------------
+
+    def get_history(
+        self,
+        user_id: str,
+        bot_id: str,
+        limit: int = 50,
+    ) -> list[StateHistoryRow]:
+        """
+        Return the N most recent FSM transitions for a bot, newest first.
+
+        Each entry is a full snapshot of bot_state at the moment
+        cycle_status changed, captured by the _bot_state_fsm_audit trigger.
+
+        Args:
+            limit: maximum rows to return (default 50).
+
+        Returns:
+            List of StateHistoryRow ordered by id DESC (newest first).
+            Empty list if no history exists yet.
+
+        Example:
+            history = repo.get_history("igor", "btc_paper_01", limit=10)
+            for h in history:
+                print(h.transition_label, h.recorded_at)
+            # IN_POSITION → CLOSING  2025-11-01T14:23:11+00:00
+            # ENTERING → IN_POSITION 2025-11-01T14:20:05+00:00
+            # IDLE → ENTERING        2025-11-01T14:19:58+00:00
+        """
+        query = """
+            SELECT
+                id, user_id, bot_id,
+                old_cycle_status, new_cycle_status,
+                version, cycle_id,
+                virtual_balance_free, virtual_balance_locked,
+                position_qty, position_avg_price,
+                dca_count, quote_spent, quote_received,
+                last_applied_trade_id,
+                active_entry_order_id, active_tp_order_id,
+                closing_reason, trigger_op, recorded_at
+            FROM bot_state_history
+            WHERE user_id = %s AND bot_id = %s
+            ORDER BY id DESC
+            LIMIT %s
+        """
+        with transaction() as cur:
+            cur.execute(query, (user_id, bot_id, limit))
+            rows = cur.fetchall()
+
+        return [StateHistoryRow.from_row(dict(r)) for r in (rows or [])]
 
 
 # ------------------------------------------------------------------
