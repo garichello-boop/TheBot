@@ -22,15 +22,11 @@ class StateRepository:
     from the BotState object itself.
 
     Optimistic concurrency: save() checks WHERE version = state.version - 1.
-    rowcount == 0 → RuntimeError (version conflict or missing row).
+    rowcount == 0 в†’ RuntimeError (version conflict or missing row).
 
     get_connection() / transaction() use the globally configured pool
     (initialised by create_pool() in bot.py). self._pool is stored for
     future direct-pool usage.
-
-    Audit trail:
-        get_history() reads bot_state_history — the append-only FSM
-        transition log written by the _bot_state_fsm_audit trigger.
     """
 
     def __init__(self, db_pool) -> None:
@@ -59,7 +55,7 @@ class StateRepository:
                 virtual_balance_free, virtual_balance_locked,
                 position_qty, position_avg_price, dca_count,
                 quote_spent, quote_received, last_applied_trade_id,
-                active_entry_order_id, active_tp_order_id,
+                active_entry_order_id, active_tp_order_id, active_tp_price,
                 active_dca_order_ids, pending_client_order_id,
                 entered_at, last_order_at, updated_at,
                 closing_reason
@@ -108,7 +104,7 @@ class StateRepository:
                 virtual_balance_free, virtual_balance_locked,
                 position_qty, position_avg_price, dca_count,
                 quote_spent, quote_received, last_applied_trade_id,
-                active_entry_order_id, active_tp_order_id,
+                active_entry_order_id, active_tp_order_id, active_tp_price,
                 active_dca_order_ids, pending_client_order_id,
                 entered_at, last_order_at, updated_at,
                 closing_reason
@@ -159,6 +155,7 @@ class StateRepository:
         with conn.cursor() as cur:
             cur.execute(sql, params)
 
+
     # ------------------------------------------------------------------
     # Audit trail: FSM history
     # ------------------------------------------------------------------
@@ -168,27 +165,16 @@ class StateRepository:
         user_id: str,
         bot_id: str,
         limit: int = 50,
-    ) -> list[StateHistoryRow]:
+    ) -> list:
         """
         Return the N most recent FSM transitions for a bot, newest first.
 
         Each entry is a full snapshot of bot_state at the moment
         cycle_status changed, captured by the _bot_state_fsm_audit trigger.
 
-        Args:
-            limit: maximum rows to return (default 50).
-
         Returns:
             List of StateHistoryRow ordered by id DESC (newest first).
             Empty list if no history exists yet.
-
-        Example:
-            history = repo.get_history("igor", "btc_paper_01", limit=10)
-            for h in history:
-                print(h.transition_label, h.recorded_at)
-            # IN_POSITION → CLOSING  2025-11-01T14:23:11+00:00
-            # ENTERING → IN_POSITION 2025-11-01T14:20:05+00:00
-            # IDLE → ENTERING        2025-11-01T14:19:58+00:00
         """
         query = """
             SELECT
@@ -259,6 +245,7 @@ def _build_update_sql() -> str:
             last_applied_trade_id   = %s,
             active_entry_order_id   = %s,
             active_tp_order_id      = %s,
+            active_tp_price         = %s,
             active_dca_order_ids    = %s,
             pending_client_order_id = %s,
             entered_at              = %s,
@@ -287,6 +274,7 @@ def _to_update_params(state: BotState) -> tuple:
         state.last_applied_trade_id,
         state.active_entry_order_id,
         state.active_tp_order_id,
+        state.active_tp_price,
         list(state.active_dca_order_ids),
         state.pending_client_order_id,
         state.entered_at,
@@ -319,6 +307,7 @@ def _to_params(state: BotState) -> tuple:
         state.last_applied_trade_id,
         state.active_entry_order_id,
         state.active_tp_order_id,
+        state.active_tp_price,
         list(state.active_dca_order_ids),
         state.pending_client_order_id,
         state.entered_at,

@@ -76,6 +76,25 @@ class PriceData:
             raise ValueError(f"timestamp должен быть > 0, получено: {self.timestamp}")
 
 
+@dataclass(frozen=True)
+class Kline:
+    """
+    Одна OHLCV свеча.
+
+    Используется StateRecovery для OHLCV-playback при рестарте PaperBroker:
+    если за период даунтайма high_price >= active_tp_price, TP считается
+    исполненным и симулируется fill.
+
+    timestamp_ms — время открытия свечи (миллисекунды UTC).
+    """
+    timestamp_ms: int
+    open_price:   Decimal
+    high_price:   Decimal
+    low_price:    Decimal
+    close_price:  Decimal
+    volume:       Decimal
+
+
 # ---------------------------------------------------------------------------
 # Exceptions
 # ---------------------------------------------------------------------------
@@ -123,6 +142,10 @@ class MarketDataProvider(ABC):
         provider.subscribe("BTCUSDT")
         price = provider.get_price("BTCUSDT")   # в торговом цикле
         provider.stop()
+
+    Исторические данные (get_klines) — опциональный метод, реализованный
+    конкретными провайдерами. Используется только при рестарте PaperBroker
+    для OHLCV-playback. Доступность проверяется через hasattr().
     """
 
     @abstractmethod

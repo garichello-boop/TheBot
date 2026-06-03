@@ -21,12 +21,12 @@ class ClosingReason(str, Enum):
     Reason for entering CLOSING state.
 
     Set when FSM transitions into CLOSING (by DecisionEngine or Close Protocol).
-    Reset to NULL automatically when FSM transitions CLOSING → IDLE.
+    Reset to NULL automatically when FSM transitions CLOSING в†’ IDLE.
 
-    TP            – TP-ордер исполнился (стандартный выход).
-    SL            – Сработал стоп-лосс (bid <= avg_price * (1 - SL_PCT/100)).
-    FORCE_CLOSE   – Оператор выставил status=FORCE_CLOSE в bot_configs.
-    MANUAL_CANCEL – TP отменён вручную (бот → CLOSE_ONLY → CLOSING).
+    TP            вЂ” TP-РѕСЂРґРµСЂ РёСЃРїРѕР»РЅРёР»СЃСЏ (СЃС‚Р°РЅРґР°СЂС‚РЅС‹Р№ РІС‹С…РѕРґ).
+    SL            вЂ” РЎСЂР°Р±РѕС‚Р°Р» СЃС‚РѕРї-Р»РѕСЃСЃ (bid <= avg_price * (1 - SL_PCT/100)).
+    FORCE_CLOSE   вЂ” РћРїРµСЂР°С‚РѕСЂ РІС‹СЃС‚Р°РІРёР» status=FORCE_CLOSE РІ bot_configs.
+    MANUAL_CANCEL вЂ” TP РѕС‚РјРµРЅС‘РЅ РІСЂСѓС‡РЅСѓСЋ (Р±РѕС‚ в†’ CLOSE_ONLY в†’ CLOSING).
     """
     TP            = "TP"
     SL            = "SL"
@@ -62,6 +62,7 @@ class BotState:
     last_applied_trade_id: Optional[str] = None
     active_entry_order_id: Optional[str] = None
     active_tp_order_id: Optional[str] = None
+    active_tp_price: Optional[Decimal] = None
     pending_client_order_id: Optional[str] = None
     entered_at: Optional[datetime] = None
     last_order_at: Optional[datetime] = None
@@ -70,10 +71,10 @@ class BotState:
     # Closing metadata
     closing_reason: Optional[ClosingReason] = None
     """
-    Причина перехода в CLOSING. NULL во всех состояниях кроме CLOSING.
-    Используется в Close Protocol (шаг 9): если SL – форсировать MARKET.
-    Сбрасывается в NULL автоматически при переходе CLOSING → IDLE
-    (StateManager.transition() обрабатывает это прозрачно).
+    РџСЂРёС‡РёРЅР° РїРµСЂРµС…РѕРґР° РІ CLOSING. NULL РІРѕ РІСЃРµС… СЃРѕСЃС‚РѕСЏРЅРёСЏС… РєСЂРѕРјРµ CLOSING.
+    РСЃРїРѕР»СЊР·СѓРµС‚СЃСЏ РІ Close Protocol (С€Р°Рі 9): РµСЃР»Рё SL вЂ” С„РѕСЂСЃРёСЂРѕРІР°С‚СЊ MARKET.
+    РЎР±СЂР°СЃС‹РІР°РµС‚СЃСЏ РІ NULL Р°РІС‚РѕРјР°С‚РёС‡РµСЃРєРё РїСЂРё РїРµСЂРµС…РѕРґРµ CLOSING в†’ IDLE
+    (StateManager.transition() РѕР±СЂР°Р±Р°С‚С‹РІР°РµС‚ СЌС‚Рѕ РїСЂРѕР·СЂР°С‡РЅРѕ).
     """
 
     def __post_init__(self) -> None:
@@ -154,6 +155,11 @@ class BotState:
             last_applied_trade_id=row.get("last_applied_trade_id"),
             active_entry_order_id=row.get("active_entry_order_id"),
             active_tp_order_id=row.get("active_tp_order_id"),
+            active_tp_price=(
+                Decimal(str(row["active_tp_price"]))
+                if row.get("active_tp_price") is not None
+                else None
+            ),
             active_dca_order_ids=tuple(dca_ids),
             pending_client_order_id=row.get("pending_client_order_id"),
             cycle_id=row.get("cycle_id"),
@@ -188,7 +194,6 @@ class BotRegistry:
             stopped_at=row.get("stopped_at"),
             error_message=row.get("error_message"),
         )
-
 
 # ---------------------------------------------------------------------------
 # StateHistoryRow

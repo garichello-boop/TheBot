@@ -1,44 +1,44 @@
 """
-bot.py — точка входа торгового бота.
+bot.py вЂ” С‚РѕС‡РєР° РІС…РѕРґР° С‚РѕСЂРіРѕРІРѕРіРѕ Р±РѕС‚Р°.
 
-Запуск:
+Р—Р°РїСѓСЃРє:
   python bot.py --user alex --bot-id phor_dca
   python bot.py --user alex --bot-id btc_mean_rev
 
 Startup sequence:
-  1. Парсинг аргументов.
-  2. Загрузка AppSettings (Pydantic, из .env / ENV).
-  3. Расшифровка секретов через KeyManager (мастер-пароль вводится один раз).
-  4. Настройка Observability (EventEmitter, все sinks).
-  5. Инициализация подсистем (broker, market, state).
-  6. Проверка bot_registry — защита от двойного запуска.
-  7. StateRecovery.reconcile() — сверка с биржей после любого рестарта.
-  8. BotLoop.run() — бесконечный tick-loop.
+  1. РџР°СЂСЃРёРЅРі Р°СЂРіСѓРјРµРЅС‚РѕРІ.
+  2. Р—Р°РіСЂСѓР·РєР° AppSettings (Pydantic, РёР· .env / ENV).
+  3. Р Р°СЃС€РёС„СЂРѕРІРєР° СЃРµРєСЂРµС‚РѕРІ С‡РµСЂРµР· KeyManager (РјР°СЃС‚РµСЂ-РїР°СЂРѕР»СЊ РІРІРѕРґРёС‚СЃСЏ РѕРґРёРЅ СЂР°Р·).
+  4. РќР°СЃС‚СЂРѕР№РєР° Observability (EventEmitter, РІСЃРµ sinks).
+  5. РРЅРёС†РёР°Р»РёР·Р°С†РёСЏ РїРѕРґСЃРёСЃС‚РµРј (broker, market, state).
+  6. РџСЂРѕРІРµСЂРєР° bot_registry вЂ” Р·Р°С‰РёС‚Р° РѕС‚ РґРІРѕР№РЅРѕРіРѕ Р·Р°РїСѓСЃРєР°.
+  7. StateRecovery.reconcile() вЂ” СЃРІРµСЂРєР° СЃ Р±РёСЂР¶РµР№ РїРѕСЃР»Рµ Р»СЋР±РѕРіРѕ СЂРµСЃС‚Р°СЂС‚Р°.
+  8. BotLoop.run() вЂ” Р±РµСЃРєРѕРЅРµС‡РЅС‹Р№ tick-loop.
 
-При Ctrl+C — корректная остановка с emit BOT_STOPPED.
-При любом необработанном исключении — emit BOT_CRASHED, exit(1).
+РџСЂРё Ctrl+C вЂ” РєРѕСЂСЂРµРєС‚РЅР°СЏ РѕСЃС‚Р°РЅРѕРІРєР° СЃ emit BOT_STOPPED.
+РџСЂРё Р»СЋР±РѕРј РЅРµРѕР±СЂР°Р±РѕС‚Р°РЅРЅРѕРј РёСЃРєР»СЋС‡РµРЅРёРё вЂ” emit BOT_CRASHED, exit(1).
 
-Предположения об интерфейсах П6 (сверить при интеграции):
-  - StateRecovery.startup(user_id, bot_id, broker) → BotState
-  - StateRepository(db_pool) → repo
-  - RegistryRepository(db_pool) → repo
-  - StateManager(db_pool, emitter) → manager
+РџСЂРµРґРїРѕР»РѕР¶РµРЅРёСЏ РѕР± РёРЅС‚РµСЂС„РµР№СЃР°С… Рџ6 (СЃРІРµСЂРёС‚СЊ РїСЂРё РёРЅС‚РµРіСЂР°С†РёРё):
+  - StateRecovery.startup(user_id, bot_id, broker) в†’ BotState
+  - StateRepository(db_pool) в†’ repo
+  - RegistryRepository(db_pool) в†’ repo
+  - StateManager(db_pool, emitter) в†’ manager
 
-Предположения об интерфейсах П5:
-  - ConfigRepository(db_pool) → repo
-  - ConfigWatcher(repo, user_id, bot_id) → watcher
-  - ConfigWatcher.create_snapshot() → CycleSnapshot
-  - ConfigWatcher.set_close_only(user_id, bot_id) → None
-  - ConfigWatcher.get_config() → BotConfig
+РџСЂРµРґРїРѕР»РѕР¶РµРЅРёСЏ РѕР± РёРЅС‚РµСЂС„РµР№СЃР°С… Рџ5:
+  - ConfigRepository(db_pool) в†’ repo
+  - ConfigWatcher(repo, user_id, bot_id) в†’ watcher
+  - ConfigWatcher.create_snapshot() в†’ CycleSnapshot
+  - ConfigWatcher.set_close_only(user_id, bot_id) в†’ None
+  - ConfigWatcher.get_config() в†’ BotConfig
 
-Предположения об интерфейсах П3:
-  - setup_observability(settings, bot_id, ticker, tg_token, tg_chat_id) → EventEmitter
+РџСЂРµРґРїРѕР»РѕР¶РµРЅРёСЏ РѕР± РёРЅС‚РµСЂС„РµР№СЃР°С… Рџ3:
+  - setup_observability(settings, bot_id, ticker, tg_token, tg_chat_id) в†’ EventEmitter
 
-Предположения об интерфейсах П2:
-  - ProviderFactory.create(settings.market) → MarketDataProvider
+РџСЂРµРґРїРѕР»РѕР¶РµРЅРёСЏ РѕР± РёРЅС‚РµСЂС„РµР№СЃР°С… Рџ2:
+  - ProviderFactory.create(settings.market) в†’ MarketDataProvider
 
-Предположения об интерфейсах П4:
-  - BrokerFactory.create(settings.broker, token=...) → IBroker
+РџСЂРµРґРїРѕР»РѕР¶РµРЅРёСЏ РѕР± РёРЅС‚РµСЂС„РµР№СЃР°С… Рџ4:
+  - BrokerFactory.create(settings.broker, token=...) в†’ IBroker
 """
 from __future__ import annotations
 
@@ -55,10 +55,10 @@ load_dotenv()
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Алготрейдинговый бот",
+        description="РђР»РіРѕС‚СЂРµР№РґРёРЅРіРѕРІС‹Р№ Р±РѕС‚",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
-            "Примеры:\n"
+            "РџСЂРёРјРµСЂС‹:\n"
             "  python bot.py --user alex --bot-id phor_dca\n"
             "  python bot.py --user alex --bot-id btc_mean_rev\n"
         ),
@@ -66,18 +66,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--user",
         required=True,
-        help="Идентификатор пользователя (совпадает с user_id в bot_configs).",
+        help="РРґРµРЅС‚РёС„РёРєР°С‚РѕСЂ РїРѕР»СЊР·РѕРІР°С‚РµР»СЏ (СЃРѕРІРїР°РґР°РµС‚ СЃ user_id РІ bot_configs).",
     )
     parser.add_argument(
         "--bot-id",
         required=True,
         dest="bot_id",
-        help="Идентификатор бота (совпадает с bot_id в bot_configs).",
+        help="РРґРµРЅС‚РёС„РёРєР°С‚РѕСЂ Р±РѕС‚Р° (СЃРѕРІРїР°РґР°РµС‚ СЃ bot_id РІ bot_configs).",
     )
     parser.add_argument(
         "--log-level",
         default=None,
-        help="Переопределить уровень логирования из конфига (DEBUG/INFO/WARNING).",
+        help="РџРµСЂРµРѕРїСЂРµРґРµР»РёС‚СЊ СѓСЂРѕРІРµРЅСЊ Р»РѕРіРёСЂРѕРІР°РЅРёСЏ РёР· РєРѕРЅС„РёРіР° (DEBUG/INFO/WARNING).",
     )
     return parser.parse_args()
 
@@ -88,8 +88,8 @@ def main() -> None:
     bot_id  = args.bot_id
 
     # ------------------------------------------------------------------
-    # 1. Базовый logging до инициализации Observability
-    #    (чтобы видеть ошибки до старта EventEmitter)
+    # 1. Р‘Р°Р·РѕРІС‹Р№ logging РґРѕ РёРЅРёС†РёР°Р»РёР·Р°С†РёРё Observability
+    #    (С‡С‚РѕР±С‹ РІРёРґРµС‚СЊ РѕС€РёР±РєРё РґРѕ СЃС‚Р°СЂС‚Р° EventEmitter)
     # ------------------------------------------------------------------
     logging.basicConfig(
         level=logging.INFO,
@@ -97,10 +97,10 @@ def main() -> None:
         stream=sys.stdout,
     )
 
-    logger.info("Старт бота: user=%s, bot_id=%s", user_id, bot_id)
+    logger.info("РЎС‚Р°СЂС‚ Р±РѕС‚Р°: user=%s, bot_id=%s", user_id, bot_id)
 
     # ------------------------------------------------------------------
-    # 2. AppSettings (П0)
+    # 2. AppSettings (Рџ0)
     # ------------------------------------------------------------------
     try:
         from config.settings import AppSettings          # noqa: PLC0415
@@ -108,30 +108,30 @@ def main() -> None:
         settings          = AppSettings()
         bot_loop_settings = BotLoopSettings()
     except Exception as exc:
-        logger.critical("Не удалось загрузить конфиг: %s", exc)
+        logger.critical("РќРµ СѓРґР°Р»РѕСЃСЊ Р·Р°РіСЂСѓР·РёС‚СЊ РєРѕРЅС„РёРі: %s", exc)
         sys.exit(1)
 
-    # Переопределение уровня логирования из аргумента CLI
+    # РџРµСЂРµРѕРїСЂРµРґРµР»РµРЅРёРµ СѓСЂРѕРІРЅСЏ Р»РѕРіРёСЂРѕРІР°РЅРёСЏ РёР· Р°СЂРіСѓРјРµРЅС‚Р° CLI
     if args.log_level:
         logging.getLogger().setLevel(args.log_level.upper())
 
     # ------------------------------------------------------------------
-    # 3. KeyManager (П1) — мастер-пароль вводится один раз
+    # 3. KeyManager (Рџ1) вЂ” РјР°СЃС‚РµСЂ-РїР°СЂРѕР»СЊ РІРІРѕРґРёС‚СЃСЏ РѕРґРёРЅ СЂР°Р·
     # ------------------------------------------------------------------
     try:
         from keys.key_manager import KeyManager  # noqa: PLC0415
         km = KeyManager()
-        master_password = os.environ.get("BOT_MASTER_PASSWORD") or getpass.getpass("Введите мастер-пароль: ")
+        master_password = os.environ.get("BOT_MASTER_PASSWORD") or getpass.getpass("Р’РІРµРґРёС‚Рµ РјР°СЃС‚РµСЂ-РїР°СЂРѕР»СЊ: ")
         km.load(master_password)
-        del master_password  # не держать в памяти дольше чем нужно
+        del master_password  # РЅРµ РґРµСЂР¶Р°С‚СЊ РІ РїР°РјСЏС‚Рё РґРѕР»СЊС€Рµ С‡РµРј РЅСѓР¶РЅРѕ
     except Exception as exc:
-        logger.critical("Ошибка загрузки ключей: %s", exc)
+        logger.critical("РћС€РёР±РєР° Р·Р°РіСЂСѓР·РєРё РєР»СЋС‡РµР№: %s", exc)
         sys.exit(1)
 
     # ------------------------------------------------------------------
-    # 4. Observability (П3)
-    #    Эмиттер стартует рано — все ошибки старта идут в Telegram.
-    #    Тикер уточняется сразу после загрузки BotConfig (шаг 6).
+    # 4. Observability (Рџ3)
+    #    Р­РјРёС‚С‚РµСЂ СЃС‚Р°СЂС‚СѓРµС‚ СЂР°РЅРѕ вЂ” РІСЃРµ РѕС€РёР±РєРё СЃС‚Р°СЂС‚Р° РёРґСѓС‚ РІ Telegram.
+    #    РўРёРєРµСЂ СѓС‚РѕС‡РЅСЏРµС‚СЃСЏ СЃСЂР°Р·Сѓ РїРѕСЃР»Рµ Р·Р°РіСЂСѓР·РєРё BotConfig (С€Р°Рі 6).
     # ------------------------------------------------------------------
     try:
         from observability import setup_observability  # noqa: PLC0415
@@ -139,66 +139,66 @@ def main() -> None:
         emitter = setup_observability(
             settings=settings,
             bot_id=bot_id,
-            ticker="",   # уточняется в шаге 6 через emitter.set_ticker()
+            ticker="",   # СѓС‚РѕС‡РЅСЏРµС‚СЃСЏ РІ С€Р°РіРµ 6 С‡РµСЂРµР· emitter.set_ticker()
             tg_token=km.get("TG_BOT_TOKEN"),
             tg_chat_id=km.get("TG_CHAT_ID"),
         )
     except Exception as exc:
-        logger.critical("Не удалось инициализировать Observability: %s", exc)
+        logger.critical("РќРµ СѓРґР°Р»РѕСЃСЊ РёРЅРёС†РёР°Р»РёР·РёСЂРѕРІР°С‚СЊ Observability: %s", exc)
         sys.exit(1)
 
     # ------------------------------------------------------------------
-    # 5. База данных — пул соединений
+    # 5. Р‘Р°Р·Р° РґР°РЅРЅС‹С… вЂ” РїСѓР» СЃРѕРµРґРёРЅРµРЅРёР№
     # ------------------------------------------------------------------
     try:
         from db import init_pool as create_pool  # noqa: PLC0415
         db_pool = create_pool(settings.database.url)
     except Exception as exc:
-        logger.critical("Не удалось подключиться к PostgreSQL: %s", exc)
+        logger.critical("РќРµ СѓРґР°Р»РѕСЃСЊ РїРѕРґРєР»СЋС‡РёС‚СЊСЃСЏ Рє PostgreSQL: %s", exc)
         emitter.emit(
             event_type="PG_CONNECTION_FAILED",
             level="CRITICAL",
-            message=f"PostgreSQL недоступен при старте: {exc}",
+            message=f"PostgreSQL РЅРµРґРѕСЃС‚СѓРїРµРЅ РїСЂРё СЃС‚Р°СЂС‚Рµ: {exc}",
             payload={"error": str(exc)},
         )
         sys.exit(1)
 
     # ------------------------------------------------------------------
-    # 6. Конфигурация бота (П5)
+    # 6. РљРѕРЅС„РёРіСѓСЂР°С†РёСЏ Р±РѕС‚Р° (Рџ5)
     # ------------------------------------------------------------------
     try:
         from bot_config import ConfigRepository, ConfigWatcher  # noqa: PLC0415
         config_repo    = ConfigRepository(db_pool)
         config_watcher = ConfigWatcher(config_repo, user_id=user_id, bot_id=bot_id)
 
-        # Первичная загрузка конфига — SELECT FOR UPDATE (защита от двойного запуска)
+        # РџРµСЂРІРёС‡РЅР°СЏ Р·Р°РіСЂСѓР·РєР° РєРѕРЅС„РёРіР° вЂ” SELECT FOR UPDATE (Р·Р°С‰РёС‚Р° РѕС‚ РґРІРѕР№РЅРѕРіРѕ Р·Р°РїСѓСЃРєР°)
         bot_config = config_watcher.get_config()
         ticker     = bot_config.ticker
 
-        # Обновляем тикер в эмиттере — все последующие события будут с правильным тикером
+        # РћР±РЅРѕРІР»СЏРµРј С‚РёРєРµСЂ РІ СЌРјРёС‚С‚РµСЂРµ вЂ” РІСЃРµ РїРѕСЃР»РµРґСѓСЋС‰РёРµ СЃРѕР±С‹С‚РёСЏ Р±СѓРґСѓС‚ СЃ РїСЂР°РІРёР»СЊРЅС‹Рј С‚РёРєРµСЂРѕРј
         emitter.set_ticker(ticker)
 
         logger.info(
-            "Конфиг загружен: ticker=%s, strategy=%s, status=%s, version=%d",
+            "РљРѕРЅС„РёРі Р·Р°РіСЂСѓР¶РµРЅ: ticker=%s, strategy=%s, status=%s, version=%d",
             ticker, bot_config.strategy_name, bot_config.status, bot_config.config_version,
         )
     except Exception as exc:
-        logger.critical("Не удалось загрузить конфиг бота: %s", exc)
+        logger.critical("РќРµ СѓРґР°Р»РѕСЃСЊ Р·Р°РіСЂСѓР·РёС‚СЊ РєРѕРЅС„РёРі Р±РѕС‚Р°: %s", exc)
         emitter.emit(
             event_type="CONFIG_VALIDATION_FAILED",
             level="CRITICAL",
-            message=f"Ошибка загрузки bot_config: {exc}",
+            message=f"РћС€РёР±РєР° Р·Р°РіСЂСѓР·РєРё bot_config: {exc}",
             payload={"user_id": user_id, "bot_id": bot_id, "error": str(exc)},
         )
         sys.exit(1)
 
-    # Проверяем статус — если STOPPED, не стартуем
+    # РџСЂРѕРІРµСЂСЏРµРј СЃС‚Р°С‚СѓСЃ вЂ” РµСЃР»Рё STOPPED, РЅРµ СЃС‚Р°СЂС‚СѓРµРј
     if bot_config.status == "STOPPED":
-        logger.info("bot_configs.status=STOPPED — бот не запускается")
+        logger.info("bot_configs.status=STOPPED вЂ” Р±РѕС‚ РЅРµ Р·Р°РїСѓСЃРєР°РµС‚СЃСЏ")
         sys.exit(0)
 
     # ------------------------------------------------------------------
-    # 7. Брокер (П4)
+    # 7. Р‘СЂРѕРєРµСЂ (Рџ4)
     # ------------------------------------------------------------------
     try:
         from broker.broker_factory import BrokerFactory
@@ -212,38 +212,38 @@ def main() -> None:
         broker = bundle.broker
         tracker = bundle.tracker
         bundle.start()
-        logger.info("Брокер инициализирован: %s", settings.broker.broker_type)
+        logger.info("Р‘СЂРѕРєРµСЂ РёРЅРёС†РёР°Р»РёР·РёСЂРѕРІР°РЅ: %s", settings.broker.broker_type)
     except Exception as exc:
-        logger.critical("Не удалось инициализировать брокер: %s", exc)
+        logger.critical("РќРµ СѓРґР°Р»РѕСЃСЊ РёРЅРёС†РёР°Р»РёР·РёСЂРѕРІР°С‚СЊ Р±СЂРѕРєРµСЂ: %s", exc)
         emitter.emit(
             event_type="CREDENTIALS_MISSING",
             level="CRITICAL",
-            message=f"Ошибка инициализации брокера: {exc}",
+            message=f"РћС€РёР±РєР° РёРЅРёС†РёР°Р»РёР·Р°С†РёРё Р±СЂРѕРєРµСЂР°: {exc}",
             payload={"broker_type": settings.broker.broker_type, "error": str(exc)},
         )
         sys.exit(1)
 
     # ------------------------------------------------------------------
-    # 8. Рыночные данные (П2)
+    # 8. Р С‹РЅРѕС‡РЅС‹Рµ РґР°РЅРЅС‹Рµ (Рџ2)
     # ------------------------------------------------------------------
     try:
         from market_data import ProviderFactory  # noqa: PLC0415
         market = ProviderFactory.create(settings.market)
         market.start()
         market.subscribe(ticker)
-        logger.info("MarketDataProvider запущен: ticker=%s", ticker)
+        logger.info("MarketDataProvider Р·Р°РїСѓС‰РµРЅ: ticker=%s", ticker)
     except Exception as exc:
-        logger.critical("Не удалось запустить MarketDataProvider: %s", exc)
+        logger.critical("РќРµ СѓРґР°Р»РѕСЃСЊ Р·Р°РїСѓСЃС‚РёС‚СЊ MarketDataProvider: %s", exc)
         emitter.emit(
             event_type="MARKET_WATCHER_ERROR",
             level="CRITICAL",
-            message=f"Ошибка запуска рыночных данных: {exc}",
+            message=f"РћС€РёР±РєР° Р·Р°РїСѓСЃРєР° СЂС‹РЅРѕС‡РЅС‹С… РґР°РЅРЅС‹С…: {exc}",
             payload={"ticker": ticker, "error": str(exc)},
         )
         sys.exit(1)
 
     # ------------------------------------------------------------------
-    # 9. State (П6): registry, repository, manager
+    # 9. State (Рџ6): registry, repository, manager
     # ------------------------------------------------------------------
     try:
         from bot_state import (  # noqa: PLC0415
@@ -256,26 +256,26 @@ def main() -> None:
         state_manager = StateManager(db_pool, emitter=emitter)
         registry_repo = RegistryRepository(db_pool)
     except Exception as exc:
-        logger.critical("Не удалось инициализировать State-подсистему: %s", exc)
+        logger.critical("РќРµ СѓРґР°Р»РѕСЃСЊ РёРЅРёС†РёР°Р»РёР·РёСЂРѕРІР°С‚СЊ State-РїРѕРґСЃРёСЃС‚РµРјСѓ: %s", exc)
         sys.exit(1)
 
     # ------------------------------------------------------------------
-    # 10. Проверка bot_registry + StateRecovery.reconcile() (П6)
+    # 10. РџСЂРѕРІРµСЂРєР° bot_registry + StateRecovery.reconcile() (Рџ6)
     # ------------------------------------------------------------------
     emitter.emit(
         event_type="BOT_STARTING",
         level="INFO",
-        message=f"Запуск бота: {bot_id}",
+        message=f"Р—Р°РїСѓСЃРє Р±РѕС‚Р°: {bot_id}",
         payload={"user_id": user_id, "bot_id": bot_id, "ticker": ticker},
     )
 
     try:
-        # StateRecovery выполняет:
-        #   - проверку bot_registry (защита от двойного запуска)
-        #   - восстановление bot_state из PostgreSQL
-        #   - reconciliation с биржей (активные ордера, fills)
-        #   - 8-шаговый Startup/Restart Recovery из ТЗ 7
-        # После этого вызова бот может торговать.
+        # StateRecovery РІС‹РїРѕР»РЅСЏРµС‚:
+        #   - РїСЂРѕРІРµСЂРєСѓ bot_registry (Р·Р°С‰РёС‚Р° РѕС‚ РґРІРѕР№РЅРѕРіРѕ Р·Р°РїСѓСЃРєР°)
+        #   - РІРѕСЃСЃС‚Р°РЅРѕРІР»РµРЅРёРµ bot_state РёР· PostgreSQL
+        #   - reconciliation СЃ Р±РёСЂР¶РµР№ (Р°РєС‚РёРІРЅС‹Рµ РѕСЂРґРµСЂР°, fills)
+        #   - 8-С€Р°РіРѕРІС‹Р№ Startup/Restart Recovery РёР· РўР— 7
+        # РџРѕСЃР»Рµ СЌС‚РѕРіРѕ РІС‹Р·РѕРІР° Р±РѕС‚ РјРѕР¶РµС‚ С‚РѕСЂРіРѕРІР°С‚СЊ.
         StateRecovery.startup(
             user_id=user_id,
             bot_id=bot_id,
@@ -286,12 +286,13 @@ def main() -> None:
             registry_repo=registry_repo,
             emitter=emitter,
             virtual_balance=bot_config.virtual_balance,
+            market=market,  # for OHLCV playback on PaperBroker restart
         )
 
-        logger.info("StateRecovery завершён — готов к торговле")
+        logger.info("StateRecovery Р·Р°РІРµСЂС€С‘РЅ вЂ” РіРѕС‚РѕРІ Рє С‚РѕСЂРіРѕРІР»Рµ")
     except RuntimeError as exc:
-        # RuntimeError от StateRecovery — например, бот уже запущен
-        logger.critical("StateRecovery отказал: %s", exc)
+        # RuntimeError РѕС‚ StateRecovery вЂ” РЅР°РїСЂРёРјРµСЂ, Р±РѕС‚ СѓР¶Рµ Р·Р°РїСѓС‰РµРЅ
+        logger.critical("StateRecovery РѕС‚РєР°Р·Р°Р»: %s", exc)
         emitter.emit(
             event_type="BOT_CRASHED",
             level="CRITICAL",
@@ -300,7 +301,7 @@ def main() -> None:
         )
         sys.exit(1)
     except Exception as exc:
-        logger.critical("Ошибка при восстановлении состояния: %s", exc)
+        logger.critical("РћС€РёР±РєР° РїСЂРё РІРѕСЃСЃС‚Р°РЅРѕРІР»РµРЅРёРё СЃРѕСЃС‚РѕСЏРЅРёСЏ: %s", exc)
         emitter.emit(
             event_type="BOT_CRASHED",
             level="CRITICAL",
@@ -310,14 +311,14 @@ def main() -> None:
         sys.exit(1)
 
     # ------------------------------------------------------------------
-    # 11. Стратегия
+    # 11. РЎС‚СЂР°С‚РµРіРёСЏ
     # ------------------------------------------------------------------
     try:
         from business_logic import create_strategy  # noqa: PLC0415
         strategy = create_strategy(bot_config.strategy_name)
-        logger.info("Стратегия: %s", strategy.name())
+        logger.info("РЎС‚СЂР°С‚РµРіРёСЏ: %s", strategy.name())
     except Exception as exc:
-        logger.critical("Не удалось создать стратегию '%s': %s", bot_config.strategy_name, exc)
+        logger.critical("РќРµ СѓРґР°Р»РѕСЃСЊ СЃРѕР·РґР°С‚СЊ СЃС‚СЂР°С‚РµРіРёСЋ '%s': %s", bot_config.strategy_name, exc)
         sys.exit(1)
 
     # ------------------------------------------------------------------
@@ -340,29 +341,29 @@ def main() -> None:
     )
 
     # ------------------------------------------------------------------
-    # 13. Запуск — блокирует поток до остановки
+    # 13. Р—Р°РїСѓСЃРє вЂ” Р±Р»РѕРєРёСЂСѓРµС‚ РїРѕС‚РѕРє РґРѕ РѕСЃС‚Р°РЅРѕРІРєРё
     # ------------------------------------------------------------------
     try:
         bot.run()
     except KeyboardInterrupt:
-        logger.info("Получен Ctrl+C — корректная остановка")
+        logger.info("РџРѕР»СѓС‡РµРЅ Ctrl+C вЂ” РєРѕСЂСЂРµРєС‚РЅР°СЏ РѕСЃС‚Р°РЅРѕРІРєР°")
         emitter.emit(
             event_type="BOT_STOPPED",
             level="INFO",
-            message="Остановлен оператором (Ctrl+C)",
+            message="РћСЃС‚Р°РЅРѕРІР»РµРЅ РѕРїРµСЂР°С‚РѕСЂРѕРј (Ctrl+C)",
             payload={"bot_id": bot_id},
         )
     except Exception as exc:
-        logger.critical("Необработанное исключение в BotLoop: %s", exc, exc_info=True)
+        logger.critical("РќРµРѕР±СЂР°Р±РѕС‚Р°РЅРЅРѕРµ РёСЃРєР»СЋС‡РµРЅРёРµ РІ BotLoop: %s", exc, exc_info=True)
         emitter.emit(
             event_type="BOT_CRASHED",
             level="CRITICAL",
-            message=f"Необработанное исключение: {exc}",
+            message=f"РќРµРѕР±СЂР°Р±РѕС‚Р°РЅРЅРѕРµ РёСЃРєР»СЋС‡РµРЅРёРµ: {exc}",
             payload={"error": str(exc), "bot_id": bot_id},
         )
         sys.exit(1)
     finally:
-        # Корректное завершение подсистем
+        # РљРѕСЂСЂРµРєС‚РЅРѕРµ Р·Р°РІРµСЂС€РµРЅРёРµ РїРѕРґСЃРёСЃС‚РµРј
         try:
             registry_repo.update_status(user_id, bot_id, operational_status="STOPPED")
         except Exception:
